@@ -1,0 +1,198 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 100%;
+
+    --card: 0 0% 0%;
+    --card-foreground: 0 0% 100%;
+
+    --popover: 0 0% 0%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 210 20% 98%;
+    --primary-foreground: 0 0% 0%;
+
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 70%;
+
+    --accent: 210 20% 98%;
+    --accent-foreground: 0 0% 0%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 10%;
+    --ring: 210 20% 70%;
+
+    --radius: 0.375rem;
+
+    --panel: 0 0% 0%;
+    --panel-border: 0 0% 15%;
+    
+    --canvas: 0 0% 0%;
+    
+    --node-default: 0 0% 20%;
+    --node-active: 210 20% 90%;
+    
+    --live-indicator: 142 76% 45%;
+    --live-indicator-foreground: 0 0% 0%;
+    
+    /* Color palette for indications and highlights */
+    --blue-highlight: 250 85% 60%;
+    --green-highlight: 150 75% 45%;
+    --orange-highlight: 210 20% 70%;
+    --red-highlight: 0 84% 60%;
+    --gray-highlight: 0 0% 50%;
+
+    /* Animation durations */
+    --transition-fast: 150ms;
+    --transition-base: 250ms;
+    --transition-slow: 350ms;
+
+    /* Glass effect variables */
+    --glass-bg: 0 0% 100% / 0.1;
+    --glass-border: 0 0% 100% / 0.2;
+    --glass-blur: 12px;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-white/10 backdrop-blur-md border border-white/20;
+  }
+  
+  .glass-hover {
+    @apply hover:bg-white/20 hover:border-white/30;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Smooth transitions for interactive elements */
+  button,
+  a,
+  [role="button"] {
+    transition: all var(--transition-base) ease-in-out;
+  }
+
+  /* Pulse animation for live indicators */
+  @keyframes pulse-subtle {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.7;
+    }
+  }
+
+  .animate-pulse-subtle {
+    animation: pulse-subtle 2s ease-in-out infinite;
+  }
+
+  /* Slim scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+}
+
+@keyframes scale-pop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.map-canvas .maplibregl-ctrl-bottom-right .maplibregl-ctrl-scale {
+  margin-right: 84px;
+  background-color: rgba(0, 0, 0, 0.7);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: white;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  animation: scale-pop 0.4s ease-out;
+}
+
+.map-canvas .maplibregl-ctrl-scale {
+  background-color: rgba(0, 0, 0, 0.7) !important;
+  border: 1px solid rgba(255, 255, 255, 0.3) !important;
+  color: white !important;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  animation: scale-pop 0.4s ease-out;
+}
+
+.map-canvas .maplibregl-ctrl-group {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: none;
+}
+
+.map-canvas .maplibregl-ctrl-group button {
+  background-color: rgba(0, 0, 0, 0.6) !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.map-canvas .maplibregl-ctrl-group button:hover,
+.map-canvas .maplibregl-ctrl-group button:focus-visible {
+  background-color: rgba(0, 0, 0, 0.75) !important;
+}
+
+.map-canvas .maplibregl-ctrl-group button:disabled {
+  background-color: rgba(0, 0, 0, 0.45) !important;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.map-canvas .maplibregl-ctrl button .maplibregl-ctrl-icon {
+  filter: invert(1) brightness(1.1);
+}
+
+.map-canvas .map-cursor {
+  right: 84px;
+  bottom: 52px;
+}

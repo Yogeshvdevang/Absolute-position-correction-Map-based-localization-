@@ -1,0 +1,17 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Rover body -->
+  <rect x="12" y="16" width="24" height="12" fill="currentColor" rx="2"/>
+  
+  <!-- Wheels -->
+  <circle cx="16" cy="32" r="4" fill="currentColor" opacity="0.9"/>
+  <circle cx="24" cy="32" r="4" fill="currentColor" opacity="0.9"/>
+  <circle cx="32" cy="32" r="4" fill="currentColor" opacity="0.9"/>
+  
+  <!-- Antenna/Sensor -->
+  <rect x="22" y="10" width="4" height="6" fill="currentColor" opacity="0.8"/>
+  <circle cx="24" cy="10" r="2" fill="currentColor"/>
+  
+  <!-- Windows/Sensors -->
+  <rect x="16" y="18" width="4" height="4" fill="currentColor" opacity="0.5"/>
+  <rect x="28" y="18" width="4" height="4" fill="currentColor" opacity="0.5"/>
+</svg>

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "cpu",
+  "simd",
+  "cuda",
+]
+resolver = "2"

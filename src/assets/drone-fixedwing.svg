@@ -1,0 +1,17 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Fixed wing body -->
+  <path d="M24 8 L28 32 L24 38 L20 32 Z" fill="currentColor"/>
+  
+  <!-- Wings -->
+  <path d="M8 20 L24 22 L40 20 L38 24 L24 26 L10 24 Z" fill="currentColor" opacity="0.9"/>
+  
+  <!-- Tail -->
+  <path d="M20 34 L24 38 L28 34 L24 36 Z" fill="currentColor" opacity="0.8"/>
+  
+  <!-- Cockpit -->
+  <circle cx="24" cy="14" r="3" fill="currentColor" opacity="0.7"/>
+  
+  <!-- Wing details -->
+  <line x1="12" y1="22" x2="12" y2="24" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+  <line x1="36" y1="22" x2="36" y2="24" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+</svg>
