@@ -102,6 +102,7 @@ const getEntityIconName = (e: Entity) => {
 export interface MapViewRef {
   searchLocation: (query: string) => Promise<void>;
   flyTo: (lng: number, lat: number, zoom?: number) => void;
+  getSnapshot: () => string | null;
 }
 
 interface MapViewProps {
@@ -125,6 +126,12 @@ interface MapViewProps {
   showInternationalBorders?: boolean;
   showLineOfControl?: boolean;
   showIndianClaimedBorder?: boolean;
+  drawBBoxActive?: boolean;
+  offlineBBox?: { west: number; south: number; east: number; north: number } | null;
+  budgetBBox?: { west: number; south: number; east: number; north: number } | null;
+  onOfflineBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
+  onDrawBBoxActiveChange?: (active: boolean) => void;
+  onZoomChange?: (zoom: number) => void;
 }
 
 export const MapView = forwardRef<MapViewRef, MapViewProps>(({
@@ -147,13 +154,20 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   surveyPatternType = 'grid',
   showInternationalBorders = true,
   showLineOfControl = true,
-  showIndianClaimedBorder = true
+  showIndianClaimedBorder = true,
+  drawBBoxActive = false,
+  offlineBBox = null,
+  budgetBBox = null,
+  onOfflineBBoxChange,
+  onDrawBBoxActiveChange,
+  onZoomChange
 }, ref) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const entitiesRef = useRef<Entity[]>([]);
   const introPlayedRef = useRef(false);
   const onEntityClickRef = useRef<typeof onEntityClick>(onEntityClick);
+  const onZoomChangeRef = useRef<typeof onZoomChange>(onZoomChange);
   const surveyBoundaryRef = useRef<LatLonPoint[]>(surveyBoundaryPoints);
   const onSurveyBoundaryChangeRef = useRef<typeof onSurveyBoundaryChange>(onSurveyBoundaryChange);
   const surveyEditEnabledRef = useRef(surveyEditEnabled);
@@ -171,6 +185,12 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   const [scaleLabel, setScaleLabel] = useState('200 mi');
   const [scaleWidth, setScaleWidth] = useState(80);
   const dragStateRef = useRef<{ type: 'vertex'; index: number } | null>(null);
+  const offlineBBoxRef = useRef<{ first?: { lon: number; lat: number } }>({});
+  const drawBBoxActiveRef = useRef(drawBBoxActive);
+
+  useEffect(() => {
+    drawBBoxActiveRef.current = drawBBoxActive;
+  }, [drawBBoxActive]);
 
   useImperativeHandle(ref, () => ({
     searchLocation: async (query: string) => {
@@ -195,6 +215,14 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
         center: [lng, lat],
         zoom
       });
+    },
+    getSnapshot: () => {
+      if (!mapRef.current) return null;
+      try {
+        return mapRef.current.getCanvas().toDataURL('image/png');
+      } catch {
+        return null;
+      }
     }
   }));
   const computeInitialCenter = (): [number, number] => {
@@ -567,6 +595,9 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     onEntityClickRef.current = onEntityClick;
   }, [onEntityClick]);
   useEffect(() => {
+    onZoomChangeRef.current = onZoomChange;
+  }, [onZoomChange]);
+  useEffect(() => {
     surveyEditEnabledRef.current = surveyEditEnabled;
   }, [surveyEditEnabled]);
   useEffect(() => {
@@ -605,7 +636,9 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       setPitch(map.getPitch());
     };
     const handleZoom = () => {
-      setZoomLevel(map.getZoom());
+      const nextZoom = map.getZoom();
+      setZoomLevel(nextZoom);
+      onZoomChangeRef.current?.(nextZoom);
     };
     const updateScale = () => {
       const center = map.getCenter();
@@ -637,6 +670,7 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     setBearing(map.getBearing());
     onBearingChange?.(map.getBearing());
     setZoomLevel(map.getZoom());
+    onZoomChangeRef.current?.(map.getZoom());
     setPitch(map.getPitch());
     map.on('mousemove', handleMouseMove);
     map.on('rotate', handleRotate);
@@ -1321,9 +1355,111 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       setMapReady(true);
     });
 
+    const ensureOfflineBBoxLayer = () => {
+      if (map.getSource('offline-bbox')) return;
+      map.addSource('offline-bbox', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      map.addLayer({
+        id: 'offline-bbox-fill',
+        type: 'fill',
+        source: 'offline-bbox',
+        paint: {
+          'fill-color': '#22d3ee',
+          'fill-opacity': 0.08
+        }
+      });
+      map.addLayer({
+        id: 'offline-bbox-line',
+        type: 'line',
+        source: 'offline-bbox',
+        paint: {
+          'line-color': '#22d3ee',
+          'line-width': 2
+        }
+      });
+    };
+
+    const ensureBudgetBBoxLayer = () => {
+      if (map.getSource('offline-budget-bbox')) return;
+      map.addSource('offline-budget-bbox', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      map.addLayer({
+        id: 'offline-budget-bbox-line',
+        type: 'line',
+        source: 'offline-budget-bbox',
+        paint: {
+          'line-color': '#ef4444',
+          'line-width': 2,
+          'line-dasharray': [2, 2]
+        }
+      });
+    };
+
+    const updateOfflineBBoxLayer = (bbox: { west: number; south: number; east: number; north: number } | null) => {
+      const src = map.getSource('offline-bbox') as GeoJSONSource | undefined;
+      if (!src) return;
+      if (!bbox) {
+        src.setData({ type: 'FeatureCollection', features: [] });
+        return;
+      }
+      const ring = [
+        [bbox.west, bbox.south],
+        [bbox.east, bbox.south],
+        [bbox.east, bbox.north],
+        [bbox.west, bbox.north],
+        [bbox.west, bbox.south],
+      ];
+      src.setData({
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: [ring] },
+          properties: {}
+        }]
+      });
+    };
+
+    const handleBBoxClick = (e: maplibregl.MapMouseEvent) => {
+      if (!drawBBoxActiveRef.current) return;
+      const first = offlineBBoxRef.current.first;
+      if (!first) {
+        offlineBBoxRef.current.first = { lon: e.lngLat.lng, lat: e.lngLat.lat };
+        return;
+      }
+      const west = Math.min(first.lon, e.lngLat.lng);
+      const east = Math.max(first.lon, e.lngLat.lng);
+      const south = Math.min(first.lat, e.lngLat.lat);
+      const north = Math.max(first.lat, e.lngLat.lat);
+      const next = { west, south, east, north };
+      updateOfflineBBoxLayer(next);
+      onOfflineBBoxChange?.(next);
+      onDrawBBoxActiveChange?.(false);
+      offlineBBoxRef.current.first = undefined;
+    };
+
+    const handleBBoxMove = (e: maplibregl.MapMouseEvent) => {
+      if (!drawBBoxActiveRef.current) return;
+      const first = offlineBBoxRef.current.first;
+      if (!first) return;
+      const west = Math.min(first.lon, e.lngLat.lng);
+      const east = Math.max(first.lon, e.lngLat.lng);
+      const south = Math.min(first.lat, e.lngLat.lat);
+      const north = Math.max(first.lat, e.lngLat.lat);
+      updateOfflineBBoxLayer({ west, south, east, north });
+    };
+
+    map.on('click', handleBBoxClick);
+    map.on('mousemove', handleBBoxMove);
+
     map.on('load', () => {
       applyBasemapStyle(map, mapStyle);
       ensureOverlay();
+      ensureOfflineBBoxLayer();
+      ensureBudgetBBoxLayer();
       syncOverlayData();
       runIntro();
       bindSurveyHandlers();
@@ -1331,6 +1467,8 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     // Re-add overlays after a basemap switch (setStyle) and keep globe projection
     map.on('style.load', () => {
       ensureOverlay();
+      ensureOfflineBBoxLayer();
+      ensureBudgetBBoxLayer();
       syncOverlayData();
        const setProjection = (map as any).setProjection;
        if (typeof setProjection === 'function') {
@@ -1341,6 +1479,7 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     map.on('error', () => {
       setBasemapError(true);
     });
+
     return () => {
       map.off('mousemove', handleMouseMove);
       map.off('rotate', handleRotate);
@@ -1348,12 +1487,73 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       map.off('zoom', handleZoom);
       map.off('zoom', updateScale);
       map.off('move', updateScale);
+      map.off('click', handleBBoxClick);
+      map.off('mousemove', handleBBoxMove);
       map.getCanvas().removeEventListener('mouseleave', handleMouseLeave);
       map.remove();
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getCanvas().style.cursor = drawBBoxActive ? 'crosshair' : '';
+    const src = map.getSource('offline-bbox') as GeoJSONSource | undefined;
+    if (!src) return;
+    if (!offlineBBox) {
+      src.setData({ type: 'FeatureCollection', features: [] });
+      return;
+    }
+    const ring = [
+      [offlineBBox.west, offlineBBox.south],
+      [offlineBBox.east, offlineBBox.south],
+      [offlineBBox.east, offlineBBox.north],
+      [offlineBBox.west, offlineBBox.north],
+      [offlineBBox.west, offlineBBox.south],
+    ];
+    src.setData({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring] },
+        properties: {}
+      }]
+    });
+  }, [offlineBBox]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const src = map.getSource('offline-budget-bbox') as GeoJSONSource | undefined;
+    if (!src) return;
+    if (!budgetBBox) {
+      src.setData({ type: 'FeatureCollection', features: [] });
+      return;
+    }
+    const ring = [
+      [budgetBBox.west, budgetBBox.south],
+      [budgetBBox.east, budgetBBox.south],
+      [budgetBBox.east, budgetBBox.north],
+      [budgetBBox.west, budgetBBox.north],
+      [budgetBBox.west, budgetBBox.south],
+    ];
+    src.setData({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring] },
+        properties: {}
+      }]
+    });
+  }, [budgetBBox]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getCanvas().style.cursor = drawBBoxActive ? 'crosshair' : '';
+  }, [drawBBoxActive]);
 
   // sync map style when prop changes - only when style actually changes
   const prevStyleRef = useRef<BasemapStyle>(mapStyle);
@@ -1594,6 +1794,7 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
           <div>{cursorCoords.lat.toFixed(5)}, {cursorCoords.lon.toFixed(5)}</div>
         </div>
       )}
+
 
       <div className="absolute z-10 bottom-4 right-4 flex flex-col items-center gap-2">
         <button

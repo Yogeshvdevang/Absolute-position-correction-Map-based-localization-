@@ -3,6 +3,7 @@ import { AssetsPanel } from './AssetsPanel';
 import { AssetDetailPanel } from './AssetDetailPanel';
 import { MapBasedModulePanel } from './MapBasedModulePanel';
 import { TrainingPipelinePanel } from './TrainingPipelinePanel';
+import { OfflineMapsPanel } from './OfflineMapsPanel';
 import { Entity } from '@/types/entity';
 import { Track } from '@/types/track';
 interface UnifiedPanelProps {
@@ -15,6 +16,14 @@ interface UnifiedPanelProps {
   onTrackSelect?: (trackId: string) => void;
   onTrackTask?: (trackId: string, taskedTo: string) => void;
   onActivePanelChange?: (panel: string) => void;
+  offlineDrawActive?: boolean;
+  onOfflineDrawActiveChange?: (active: boolean) => void;
+  offlineBBox?: { west: number; south: number; east: number; north: number } | null;
+  onOfflineBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
+  mapZoom?: number;
+  previewImages?: { min: { url: string; label: string } | null; max: { url: string; label: string } | null };
+  onCapturePreview?: (which: 'min' | 'max', zoom: number) => void;
+  onBudgetBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
 }
 export const UnifiedPanel = ({
   activePanel,
@@ -25,7 +34,15 @@ export const UnifiedPanel = ({
   selectedTrackId: _selectedTrackId,
   onTrackSelect: _onTrackSelect,
   onTrackTask: _onTrackTask,
-  onActivePanelChange: _onActivePanelChange
+  onActivePanelChange: _onActivePanelChange,
+  offlineDrawActive,
+  onOfflineDrawActiveChange,
+  offlineBBox,
+  onOfflineBBoxChange,
+  mapZoom,
+  previewImages,
+  onCapturePreview,
+  onBudgetBBoxChange
 }: UnifiedPanelProps) => {
   const [selectedTab, setSelectedTab] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
@@ -57,6 +74,21 @@ export const UnifiedPanel = ({
 
   if (activePanel === 'training') {
     return <TrainingPipelinePanel />;
+  }
+
+  if (activePanel === 'offline-maps') {
+    return (
+      <OfflineMapsPanel
+        drawActive={offlineDrawActive}
+        onDrawActiveChange={onOfflineDrawActiveChange}
+        bbox={offlineBBox}
+        onBBoxChange={onOfflineBBoxChange}
+        mapZoom={mapZoom}
+        previewImages={previewImages}
+        onCapturePreview={onCapturePreview}
+        onBudgetBBoxChange={onBudgetBBoxChange}
+      />
+    );
   }
 
   return (

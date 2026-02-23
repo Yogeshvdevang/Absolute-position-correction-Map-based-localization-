@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 import httpx
 import uvicorn
@@ -133,6 +133,125 @@ apc_train_config: Dict[str, Any] = {
   "lr": 1e-4,
   "augmentations": "medium"
 }
+
+# Offline tiles cache
+TILE_CACHE_DIR = Path(os.getenv("TILE_CACHE_DIR", _runtime_root / "tile-cache"))
+TILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+TILE_TEMPLATES = {
+  "streets": os.getenv("TILE_URL_STREETS", "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"),
+  "dark": os.getenv("TILE_URL_DARK", "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png"),
+  "satellite": os.getenv("TILE_URL_SATELLITE", "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"),
+  "terrain": os.getenv("TILE_URL_TERRAIN", "https://a.tile.opentopomap.org/{z}/{x}/{y}.png"),
+}
+
+tiles_job: Dict[str, Any] = {
+  "state": "idle",
+  "progress": 0,
+  "downloaded": 0,
+  "total": 0,
+  "current": None,
+  "started_at": None,
+  "stopped": False,
+  "error": None,
+}
+
+
+class TileDownloadRequest(BaseModel):
+  region_name: Optional[str] = None
+  bbox: Optional[Dict[str, float]] = None  # {west, south, east, north}
+  min_zoom: int = 0
+  max_zoom: int = 12
+  map_types: List[str] = Field(default_factory=lambda: ["streets"])
+  provider: Optional[str] = None
+  max_tiles: Optional[int] = None
+
+
+def _lonlat_to_tile(lon: float, lat: float, z: int) -> Tuple[int, int]:
+  import math
+  lat = max(min(lat, 85.05112878), -85.05112878)
+  n = 2 ** z
+  x = int((lon + 180.0) / 360.0 * n)
+  y = int((1.0 - math.log(math.tan(math.radians(lat)) + (1 / math.cos(math.radians(lat)))) / math.pi) / 2.0 * n)
+  x = max(0, min(n - 1, x))
+  y = max(0, min(n - 1, y))
+  return x, y
+
+
+def _tile_ranges_for_bbox(bbox: Dict[str, float], z: int) -> Tuple[int, int, int, int]:
+  x_min, y_max = _lonlat_to_tile(bbox["west"], bbox["south"], z)
+  x_max, y_min = _lonlat_to_tile(bbox["east"], bbox["north"], z)
+  return x_min, x_max, y_min, y_max
+
+
+def _estimate_tiles(bbox: Dict[str, float], min_zoom: int, max_zoom: int) -> int:
+  total = 0
+  for z in range(min_zoom, max_zoom + 1):
+    x_min, x_max, y_min, y_max = _tile_ranges_for_bbox(bbox, z)
+    total += (x_max - x_min + 1) * (y_max - y_min + 1)
+  return total
+
+
+async def _download_tiles(req: TileDownloadRequest):
+  tiles_job.update({
+    "state": "running",
+    "progress": 0,
+    "downloaded": 0,
+    "total": 0,
+    "current": None,
+    "started_at": datetime.now(timezone.utc).isoformat(),
+    "stopped": False,
+    "error": None,
+  })
+
+  bbox = req.bbox or {"west": 25.0, "south": -10.0, "east": 180.0, "north": 82.0}
+  total = _estimate_tiles(bbox, req.min_zoom, req.max_zoom) * max(1, len(req.map_types))
+  if req.max_tiles:
+    total = min(total, req.max_tiles)
+  tiles_job["total"] = total
+
+  sem = asyncio.Semaphore(8)
+
+  async def fetch_tile(client: httpx.AsyncClient, url: str, path: Path):
+    async with sem:
+      if tiles_job.get("stopped"):
+        return
+      if path.exists():
+        return
+      try:
+        resp = await client.get(url, timeout=15)
+        if resp.status_code == 200:
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_bytes(resp.content)
+      except Exception:
+        tiles_job["error"] = "download_error"
+
+  async with httpx.AsyncClient() as client:
+    downloaded = 0
+    for map_type in req.map_types:
+      template = TILE_TEMPLATES.get(map_type)
+      if not template:
+        continue
+      for z in range(req.min_zoom, req.max_zoom + 1):
+        x_min, x_max, y_min, y_max = _tile_ranges_for_bbox(bbox, z)
+        for x in range(x_min, x_max + 1):
+          for y in range(y_min, y_max + 1):
+            if tiles_job.get("stopped"):
+              tiles_job["state"] = "stopped"
+              return
+            url = template.format(z=z, x=x, y=y)
+            path = TILE_CACHE_DIR / map_type / str(z) / str(x) / f"{y}.png"
+            await fetch_tile(client, url, path)
+            downloaded += 1
+            tiles_job["downloaded"] = downloaded
+            if tiles_job["total"]:
+              tiles_job["progress"] = int((downloaded / tiles_job["total"]) * 100)
+            if req.max_tiles and downloaded >= req.max_tiles:
+              tiles_job["state"] = "complete"
+              return
+
+  tiles_job["state"] = "complete"
+
 
 
 def _mock_apc_correction(frame: APCFrame) -> APCResult:
@@ -477,6 +596,44 @@ async def apc_train_stop():
   apc_train_status["stage"] = "idle"
   apc_train_status["progress"] = 0
   return {"status": "stopped"}
+
+
+@app.get("/tiles/status")
+async def tiles_status():
+  return tiles_job
+
+
+@app.post("/tiles/estimate")
+async def tiles_estimate(req: TileDownloadRequest):
+  bbox = req.bbox or {"west": 25.0, "south": -10.0, "east": 180.0, "north": 82.0}
+  total = _estimate_tiles(bbox, req.min_zoom, req.max_zoom) * max(1, len(req.map_types))
+  return {"tiles": total}
+
+
+@app.post("/tiles/download")
+async def tiles_download(req: TileDownloadRequest):
+  if tiles_job.get("state") == "running":
+    return {"status": "already_running"}
+  asyncio.create_task(_download_tiles(req))
+  return {"status": "started"}
+
+
+@app.post("/tiles/cancel")
+async def tiles_cancel():
+  tiles_job["stopped"] = True
+  return {"status": "stopping"}
+
+
+@app.get("/tiles/{map_type}/{z}/{x}/{y}.png")
+async def get_tile(map_type: str, z: int, x: int, y: str):
+  try:
+    y_int = int(y.split(".")[0])
+  except ValueError:
+    return {"error": "invalid tile"}, 400
+  path = TILE_CACHE_DIR / map_type / str(z) / str(x) / f"{y_int}.png"
+  if path.exists():
+    return FileResponse(path)
+  return {"error": "tile not found"}, 404
 
 
 if __name__ == "__main__":

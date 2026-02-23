@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { VerticalAppBar } from '@/components/VerticalAppBar';
 import { UnifiedPanel } from '@/components/UnifiedPanel';
 import { MissionCanvas } from '@/components/MissionCanvas';
@@ -120,6 +120,15 @@ const Index = () => {
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [isDetailPanelOpen, setIsDetailPanelOpen] = useState(false);
   const [scale, setScale] = useState(1);
+  const [offlineDrawActive, setOfflineDrawActive] = useState(false);
+  const [offlineBBox, setOfflineBBox] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
+  const [budgetBBox, setBudgetBBox] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
+  const [mapZoom, setMapZoom] = useState(5.2);
+  const [previewImages, setPreviewImages] = useState<{
+    min: { url: string; label: string } | null;
+    max: { url: string; label: string } | null;
+  }>({ min: null, max: null });
+  const snapshotGetterRef = useRef<null | (() => string | null)>(null);
 
   // Calculate scale based on window size
   useEffect(() => {
@@ -145,6 +154,21 @@ const Index = () => {
     } else {
       setActivePanel(panel);
     }
+  };
+
+  useEffect(() => {
+    if (activePanel !== 'offline-maps') {
+      setPreviewImages({ min: null, max: null });
+    }
+  }, [activePanel]);
+
+  const handleCapturePreview = (which: 'min' | 'max', zoom: number) => {
+    const snap = snapshotGetterRef.current?.();
+    if (!snap) return;
+    setPreviewImages(prev => ({
+      ...prev,
+      [which]: { url: snap, label: `Zoom: ${zoom}` }
+    }));
   };
 
   const handleEntitySelect = (entityId: string, entityOverride?: Entity) => {
@@ -228,6 +252,14 @@ const Index = () => {
                 onTrackSelect={handleTrackSelect}
                 onTrackTask={handleTrackTask}
                 onActivePanelChange={handlePanelSelect}
+                offlineDrawActive={offlineDrawActive}
+                onOfflineDrawActiveChange={setOfflineDrawActive}
+                offlineBBox={offlineBBox}
+                onOfflineBBoxChange={setOfflineBBox}
+                mapZoom={mapZoom}
+                previewImages={previewImages}
+                onCapturePreview={handleCapturePreview}
+                onBudgetBBoxChange={setBudgetBBox}
               />
             </div>
           )}
@@ -238,6 +270,15 @@ const Index = () => {
                 selectedEntity={selectedEntity}
                 onEntitySelect={handleEntitySelect}
                 onEntitiesUpdate={setEntities}
+                offlineDrawActive={offlineDrawActive}
+                offlineBBox={offlineBBox}
+                onOfflineBBoxChange={setOfflineBBox}
+                onOfflineDrawActiveChange={setOfflineDrawActive}
+                onMapZoomChange={setMapZoom}
+                budgetBBox={budgetBBox}
+                onRegisterSnapshot={(fn) => {
+                  snapshotGetterRef.current = fn;
+                }}
               />
             </div>
             {isVideoFeedOpen && <VideoFeedPanel />}

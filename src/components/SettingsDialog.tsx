@@ -199,6 +199,7 @@ export const SettingsDialog = ({ open, onOpenChange }: SettingsDialogProps) => {
                   </SelectContent>
                 </Select>
               </div>
+
             </div>
           </TabsContent>
 

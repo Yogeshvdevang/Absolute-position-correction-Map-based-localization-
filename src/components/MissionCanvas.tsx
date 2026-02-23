@@ -15,6 +15,13 @@ interface MissionCanvasProps {
   selectedEntity: string | null;
   onEntitySelect: (entityId: string) => void;
   onEntitiesUpdate: (entities: any[]) => void;
+  offlineDrawActive?: boolean;
+  offlineBBox?: { west: number; south: number; east: number; north: number } | null;
+  onOfflineBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
+  onOfflineDrawActiveChange?: (active: boolean) => void;
+  onMapZoomChange?: (zoom: number) => void;
+  onRegisterSnapshot?: (fn: () => string | null) => void;
+  budgetBBox?: { west: number; south: number; east: number; north: number } | null;
 }
 
 type PlannerMission = {
@@ -102,7 +109,14 @@ const getEntityDomain = (type: string): VehicleDomain => {
 export const MissionCanvas = ({
   selectedEntity,
   onEntitySelect,
-  onEntitiesUpdate
+  onEntitiesUpdate,
+  offlineDrawActive = false,
+  offlineBBox = null,
+  onOfflineBBoxChange,
+  onOfflineDrawActiveChange,
+  onMapZoomChange,
+  onRegisterSnapshot,
+  budgetBBox
 }: MissionCanvasProps) => {
   const [mapStyle, setMapStyle] = useState<BasemapStyle>('streets');
   const [operations, setOperations] = useState<PlannerOperation[]>(initialOperations);
@@ -886,6 +900,11 @@ export const MissionCanvas = ({
     void refreshPlannerState();
   }, []);
 
+  useEffect(() => {
+    if (!onRegisterSnapshot) return;
+    onRegisterSnapshot(() => mapRef.current?.getSnapshot() ?? null);
+  }, [onRegisterSnapshot]);
+
   return <div className="h-full w-full bg-canvas flex flex-col">
       {/* Demo Mode Banner */}
       {!connected}
@@ -981,6 +1000,12 @@ export const MissionCanvas = ({
             showInternationalBorders={showInternationalBorders}
             showLineOfControl={showLineOfControl}
             showIndianClaimedBorder={showIndianClaimedBorder}
+            drawBBoxActive={offlineDrawActive}
+            offlineBBox={offlineBBox}
+            budgetBBox={budgetBBox}
+            onOfflineBBoxChange={onOfflineBBoxChange}
+            onDrawBBoxActiveChange={onOfflineDrawActiveChange}
+            onZoomChange={onMapZoomChange}
           />
         )}
         {plannerOpen && (
