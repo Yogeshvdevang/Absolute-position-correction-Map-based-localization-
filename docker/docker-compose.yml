@@ -1,9 +1,0 @@
-services:
-  mission-planner:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      FRONTEND_DIR: /app/frontend/build

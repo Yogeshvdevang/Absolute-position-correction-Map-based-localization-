@@ -1,13 +1,13 @@
-# Absolute Position Correction - Map-Based Localization
+# Satellite Image Analysis for Drift Correction
 
-A command-and-control UI plus a backend scaffold for absolute position correction (APC) using map-based localization. The system receives camera frames, aligns them to georeferenced map tiles, and outputs corrected position estimates with confidence.
+GNSS-denied visual navigation using live imagery aligned to satellite maps for drift correction in visual odometry. The system receives camera frames, matches them against georeferenced rasters, and outputs corrected position estimates with confidence.
 
 ## What This Software Does
 
 1. Visual control center for assets, missions, and map operations.
 2. Map-based module UI for APC controls and diagnostics.
 3. Training pipeline UI for dataset ingest, preprocessing, training, evaluation, and export.
-4. Backend API for telemetry, commands, and APC frame ingestion over REST or WebSocket.
+4. Backend API for telemetry, commands, APC frame ingestion, and offline map tiles.
 
 ## Key Features
 
@@ -21,7 +21,6 @@ A command-and-control UI plus a backend scaffold for absolute position correctio
 
 - `src/` frontend React UI
 - `app/backend/` FastAPI backend
-- `app/frontend/` packaged frontend build (when bundled)
 
 ## Run (Frontend)
 
@@ -41,10 +40,12 @@ Default backend port is `9000`.
 
 ## Environment
 
-Copy `.env.example` to `.env` and configure:
+Set these in `.env.local` or your shell:
 
 - `VITE_CHAOX_API_BASE`
 - `VITE_CHAOX_WS_BASE`
+- `APC_ORTHO_PATH` (orthomosaic GeoTIFF)
+- `APC_DEM_PATH` (DEM GeoTIFF)
 
 ## APC (Absolute Position Correction) API
 
@@ -58,6 +59,7 @@ REST:
 WebSocket:
 
 - `ws://<host>:9000/ws/apc` send frame JSON and receive correction results
+- `ws://<host>:9000/camera` send base64 JPEG frames (Pi camera ingest)
 
 Default APC response:
 
@@ -87,5 +89,5 @@ These endpoints are wired for development and will be connected to the real trai
 
 ## Notes
 
-- APC model inference is currently stubbed; plug in the real model in `app/backend/api.py`.
+- Coarse matching + EKF are wired; replace `coarse_match.py` with your real model later.
 - WebSocket accepts JSON messages with `image_b64` (base64 JPEG) by default.

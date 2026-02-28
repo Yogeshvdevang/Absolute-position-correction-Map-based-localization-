@@ -1,4 +1,4 @@
-import { Crosshair, Copy, Eye, Globe, Layers, SlidersHorizontal } from 'lucide-react';
+import { Crosshair, Eye, Globe, Layers, SlidersHorizontal } from 'lucide-react';
 import { Button } from './ui/button';
 
 interface VerticalAppBarProps {
@@ -29,15 +29,6 @@ export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel }: VerticalA
         onClick={() => onPanelSelect('assets')}
       >
         <Layers className="h-5 w-5" />
-      </Button>
-
-      <Button 
-        variant="ghost" 
-        size="sm" 
-        className={getButtonClass('communications')}
-        onClick={() => onPanelSelect('communications')}
-      >
-        <Copy className="h-5 w-5 -rotate-[135deg]" />
       </Button>
 
       <Button 

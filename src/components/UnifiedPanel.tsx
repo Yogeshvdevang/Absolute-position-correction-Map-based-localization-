@@ -4,6 +4,7 @@ import { AssetDetailPanel } from './AssetDetailPanel';
 import { MapBasedModulePanel } from './MapBasedModulePanel';
 import { TrainingPipelinePanel } from './TrainingPipelinePanel';
 import { OfflineMapsPanel } from './OfflineMapsPanel';
+import { TargetingPanel } from './TargetingPanel';
 import { Entity } from '@/types/entity';
 import { Track } from '@/types/track';
 interface UnifiedPanelProps {
@@ -88,6 +89,14 @@ export const UnifiedPanel = ({
         onCapturePreview={onCapturePreview}
         onBudgetBBoxChange={onBudgetBBoxChange}
       />
+    );
+  }
+
+  if (activePanel === 'targeting') {
+    return (
+      <div className="h-full flex flex-col bg-panel border-r border-panel-border">
+        <TargetingPanel />
+      </div>
     );
   }
 

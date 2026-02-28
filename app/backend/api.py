@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import sys
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Dict, List, Optional, Any, Tuple
 import httpx
 import uvicorn
 import websockets
+import cv2
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -17,6 +20,12 @@ from .models import VehicleState, MissionPlan, MissionItem
 from .system_profile import profile_hardware
 from .execution_policy import select_profile
 from .compute import init_router
+from .ws_camera import camera_receiver
+from .ws_camera import frame_buffer
+from .maps.raster_manager import RasterManager
+from .ai_engine.coarse_match import coarse_match
+from .ai_engine.ekf import EKF
+from .ai_engine.preprocess import preprocess_frame
 
 # Configuration
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://localhost:8000")
@@ -120,6 +129,9 @@ bridge_connected = False
 apc_config = APCConfig()
 apc_last_result: Optional[APCResult] = None
 apc_last_frame: Optional[APCFrame] = None
+apc_last_ts: Optional[float] = None
+apc_raster: Optional[RasterManager] = None
+apc_ekf = EKF()
 apc_train_status: Dict[str, Any] = {
   "state": "idle",
   "progress": 0,
@@ -275,6 +287,62 @@ def _mock_apc_correction(frame: APCFrame) -> APCResult:
   )
 
 
+def _decode_frame(image_b64: Optional[str]) -> Optional[np.ndarray]:
+  if not image_b64:
+    return None
+  try:
+    jpg_bytes = base64.b64decode(image_b64)
+    np_arr = np.frombuffer(jpg_bytes, np.uint8)
+    return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+  except Exception:
+    return None
+
+
+def _run_apc_pipeline(frame: APCFrame) -> APCResult:
+  global apc_last_ts
+  now = datetime.now(timezone.utc).timestamp()
+  dt = 0.1 if apc_last_ts is None else max(0.01, now - apc_last_ts)
+  apc_last_ts = now
+  apc_ekf.predict(dt)
+
+  img = _decode_frame(frame.image_b64) or frame_buffer.get()
+  if img is None or apc_raster is None or frame.lat is None or frame.lon is None:
+    return _mock_apc_correction(frame)
+
+  img = preprocess_frame(img, frame.yaw)
+  gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+  h, w = gray.shape[:2]
+  tile_size = max(32, min(h, w) // 4)
+  y0 = (h - tile_size) // 2
+  x0 = (w - tile_size) // 2
+  tile = gray[y0:y0 + tile_size, x0:x0 + tile_size]
+
+  map_patch, origin_px, origin_py = apc_raster.crop_patch(frame.lat, frame.lon, size_m=4000)
+  score, max_loc = coarse_match(tile, map_patch)
+  match_x = int(max_loc[0] * 4)
+  match_y = int(max_loc[1] * 4)
+  lat, lon = apc_raster.pixel_to_geo(origin_px + match_x, origin_py + match_y)
+
+  z = np.array([[lon], [lat]])
+  apc_ekf.update(z)
+  state = apc_ekf.state()
+  fused_lon = float(state[0, 0])
+  fused_lat = float(state[1, 0])
+
+  return APCResult(
+    frame_id=frame.frame_id,
+    timestamp=frame.timestamp,
+    lat=fused_lat,
+    lon=fused_lon,
+    alt=frame.alt,
+    yaw=frame.yaw,
+    confidence=float(score),
+    error_radius_m=max(5.0, (1.0 - float(score)) * 200),
+    source="apc-coarse",
+    meta=frame.meta or {}
+  )
+
+
 @app.on_event("startup")
 async def startup_event():
   # seed default vehicle
@@ -284,6 +352,14 @@ async def startup_event():
   app.state.compute_router = init_router(policy)
   app.state.hardware_profile = hw_profile
   app.state.execution_profile = policy
+  ortho_path = os.getenv("APC_ORTHO_PATH")
+  dem_path = os.getenv("APC_DEM_PATH")
+  if ortho_path and dem_path:
+    try:
+      global apc_raster
+      apc_raster = RasterManager(ortho_path, dem_path)
+    except Exception:
+      apc_raster = None
   asyncio.create_task(_bridge_telemetry_loop())
 
 
@@ -535,7 +611,7 @@ async def apc_set_config(cfg: APCConfig):
 async def apc_frame(frame: APCFrame):
   global apc_last_frame, apc_last_result
   apc_last_frame = frame
-  apc_last_result = _mock_apc_correction(frame)
+  apc_last_result = _run_apc_pipeline(frame)
   return apc_last_result
 
 
@@ -560,10 +636,15 @@ async def ws_apc(ws: WebSocket):
 
       global apc_last_frame, apc_last_result
       apc_last_frame = frame
-      apc_last_result = _mock_apc_correction(frame)
+      apc_last_result = _run_apc_pipeline(frame)
       await ws.send_json(apc_last_result.dict())
   except WebSocketDisconnect:
     return
+
+
+@app.websocket("/camera")
+async def camera_ws(websocket: WebSocket):
+  await camera_receiver(websocket)
 
 
 @app.get("/apc/train/status")
