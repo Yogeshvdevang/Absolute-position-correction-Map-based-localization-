@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { ScrollArea } from './ui/scroll-area';
@@ -26,6 +26,98 @@ const ControlRow = ({ label, children }: { label: string; children: ReactNode })
 export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) => {
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const [modelFileName, setModelFileName] = useState<string | null>(null);
+
+  const [liveFeedUrlInput, setLiveFeedUrlInput] = useState('');
+  const [liveFeedUrlSaved, setLiveFeedUrlSaved] = useState<string | null>(null);
+  const [isEditingLiveFeed, setIsEditingLiveFeed] = useState(true);
+  const [telemetryUrlInput, setTelemetryUrlInput] = useState('');
+  const [telemetryUrlSaved, setTelemetryUrlSaved] = useState<string | null>(null);
+  const [isEditingTelemetry, setIsEditingTelemetry] = useState(true);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLon, setManualLon] = useState('');
+  const [manualCompass, setManualCompass] = useState('');
+  const [useManualInit, setUseManualInit] = useState(false);
+  const [mapMatchStatus, setMapMatchStatus] = useState<string | null>(null);
+  const [lastInit, setLastInit] = useState<{ lat: number; lon: number; compass: number } | null>(null);
+  const [liveFeedStatus, setLiveFeedStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    const savedFeed = localStorage.getItem('chaox.liveFeedUrl');
+    const savedTelemetry = localStorage.getItem('chaox.telemetryUrl');
+    if (savedFeed) {
+      setLiveFeedUrlSaved(savedFeed);
+      setLiveFeedUrlInput(savedFeed);
+      setIsEditingLiveFeed(false);
+    }
+    if (savedTelemetry) {
+      setTelemetryUrlSaved(savedTelemetry);
+      setTelemetryUrlInput(savedTelemetry);
+      setIsEditingTelemetry(false);
+    }
+  }, []);
+
+  const handleSaveLiveFeed = () => {
+    const trimmed = liveFeedUrlInput.trim();
+    if (!trimmed) return;
+    localStorage.setItem('chaox.liveFeedUrl', trimmed);
+    setLiveFeedUrlSaved(trimmed);
+    setIsEditingLiveFeed(false);
+  };
+
+  const handleSaveTelemetry = () => {
+    const trimmed = telemetryUrlInput.trim();
+    if (!trimmed) return;
+    localStorage.setItem('chaox.telemetryUrl', trimmed);
+    setTelemetryUrlSaved(trimmed);
+    setIsEditingTelemetry(false);
+  };
+
+  const handleConnectLiveFeed = () => {
+    if (!liveFeedUrlSaved) {
+      setLiveFeedStatus('Set a live feed URL first.');
+      return;
+    }
+    setLiveFeedStatus(`Connected to ${liveFeedUrlSaved}`);
+  };
+
+  const handleMapMatch = async () => {
+    setMapMatchStatus('Initializing...');
+    if (useManualInit) {
+      const lat = Number(manualLat);
+      const lon = Number(manualLon);
+      const compass = Number(manualCompass);
+      if (![lat, lon, compass].every((v) => Number.isFinite(v))) {
+        setMapMatchStatus('Enter valid manual lat/lon/compass.');
+        return;
+      }
+      setLastInit({ lat, lon, compass });
+      setMapMatchStatus('Map matching started (manual init).');
+      return;
+    }
+    if (!telemetryUrlSaved) {
+      setMapMatchStatus('Set a telemetry URL first.');
+      return;
+    }
+    try {
+      const res = await fetch(telemetryUrlSaved);
+      if (!res.ok) {
+        setMapMatchStatus(`Telemetry failed (${res.status}).`);
+        return;
+      }
+      const data = await res.json();
+      const lat = Number(data.lat);
+      const lon = Number(data.lon);
+      const compass = Number(data.compass);
+      if (![lat, lon, compass].every((v) => Number.isFinite(v))) {
+        setMapMatchStatus('Telemetry missing lat/lon/compass fields.');
+        return;
+      }
+      setLastInit({ lat, lon, compass });
+      setMapMatchStatus('Map matching started (telemetry init).');
+    } catch {
+      setMapMatchStatus('Telemetry request failed (network).');
+    }
+  };
 
   const handleModelPick = () => {
     modelInputRef.current?.click();
@@ -65,8 +157,6 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                 <div className="space-y-3">
                   <SectionLabel>Map Import</SectionLabel>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button variant="outline" size="sm">Upload Ortho Map</Button>
-                    <Button variant="outline" size="sm">Upload Abstract Map</Button>
                     <Button variant="outline" size="sm">Load 4x4 km Patch</Button>
                     <Button variant="outline" size="sm">Batch Import Tiles</Button>
                   </div>
@@ -253,6 +343,61 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
               <AccordionContent>
                 <div className="space-y-3">
                   <SectionLabel>Tile Settings</SectionLabel>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button variant="outline" size="sm" onClick={handleMapMatch}>Map Matching</Button>
+                    <Button variant="outline" size="sm" onClick={handleConnectLiveFeed}>Drone Live Feed</Button>
+                  </div>
+                  <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-2">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Drone Live Feed</div>
+                    {isEditingLiveFeed ? (
+                      <div className="flex gap-2">
+                        <Input className="h-8 text-xs" placeholder="https://..." value={liveFeedUrlInput} onChange={(e) => setLiveFeedUrlInput(e.target.value)} />
+                        <Button size="sm" onClick={handleSaveLiveFeed}>Save</Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] text-muted-foreground truncate">{liveFeedUrlSaved}</div>
+                        <Button variant="outline" size="sm" onClick={() => setIsEditingLiveFeed(true)}>Edit</Button>
+                      </div>
+                    )}
+                    {liveFeedStatus && <div className="text-[11px] text-muted-foreground">{liveFeedStatus}</div>}
+                  </div>
+                  <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-2">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Map Matching Init</div>
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs text-foreground">Use Manual Entry</div>
+                      <Switch checked={useManualInit} onCheckedChange={(v) => setUseManualInit(Boolean(v))} />
+                    </div>
+                    {useManualInit ? (
+                      <div className="grid grid-cols-3 gap-2">
+                        <Input className="h-8 text-xs" placeholder="Lat" value={manualLat} onChange={(e) => setManualLat(e.target.value)} />
+                        <Input className="h-8 text-xs" placeholder="Lon" value={manualLon} onChange={(e) => setManualLon(e.target.value)} />
+                        <Input className="h-8 text-xs" placeholder="Compass" value={manualCompass} onChange={(e) => setManualCompass(e.target.value)} />
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        {isEditingTelemetry ? (
+                          <>
+                            <Input className="h-8 text-xs" placeholder="Telemetry URL" value={telemetryUrlInput} onChange={(e) => setTelemetryUrlInput(e.target.value)} />
+                            <Button size="sm" onClick={handleSaveTelemetry}>Save</Button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="text-[11px] text-muted-foreground truncate">{telemetryUrlSaved}</div>
+                            <Button variant="outline" size="sm" onClick={() => setIsEditingTelemetry(true)}>Edit</Button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {lastInit && (
+                      <div className="text-[11px] text-muted-foreground">Init: {lastInit.lat.toFixed(5)}, {lastInit.lon.toFixed(5)} ? {lastInit.compass.toFixed(1)}?</div>
+                    )}
+                    {mapMatchStatus && <div className="text-[11px] text-muted-foreground">{mapMatchStatus}</div>}
+                  </div>
+                  <div className="rounded-md border border-border/60 bg-background/60 p-2">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">AI/ML Feed</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Waiting for frames...</div>
+                  </div>
                   <div className="space-y-2">
                     <ControlRow label="Tile Size (m)">
                       <Input className="h-8 w-[120px] text-xs" placeholder="64" />

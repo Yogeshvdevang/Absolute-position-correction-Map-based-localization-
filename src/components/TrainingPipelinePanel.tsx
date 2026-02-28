@@ -42,6 +42,11 @@ export const TrainingPipelinePanel = () => {
                 <div className="space-y-3">
                   <SectionLabel>Sources</SectionLabel>
                   <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button variant="outline" size="sm">Upload Ortho Map</Button>
+                      <Button variant="outline" size="sm">Upload Abstract Map</Button>
+                    </div>
+                    <Button variant="outline" size="sm">Connect Drone Live Feed</Button>
                     <Button variant="outline" size="sm">Upload Dataset</Button>
                     <ControlRow label="Dataset Path">
                       <Input className="h-8 w-[160px] text-xs" placeholder="/data/apc" />
