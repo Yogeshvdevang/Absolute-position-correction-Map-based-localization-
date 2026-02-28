@@ -59,6 +59,7 @@ export const OfflineMapsPanel = ({
   });
   const [provider, setProvider] = useState('osm');
   const [estimate, setEstimate] = useState<number | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
   const [budgetEstimate, setBudgetEstimate] = useState<number | null>(null);
   const [budgetBBoxLocal, setBudgetBBoxLocal] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
   const [status, setStatus] = useState<any>(null);
@@ -171,6 +172,9 @@ export const OfflineMapsPanel = ({
 
   const maxTilesBudget = Math.floor(storageBudget * 5000);
 
+  const AVG_TILE_BYTES = 50 * 1024;
+  const estimatedSizeGb = estimate !== null ? (estimate * AVG_TILE_BYTES) / (1024 ** 3) : null;
+
   const estimateTilesForBBox = async (targetBBox: { west: number; south: number; east: number; north: number }) => {
     if (!mapTypeList.length) return 0;
     const res = await fetch(`${apiBase}/tiles/estimate`, {
@@ -228,14 +232,23 @@ export const OfflineMapsPanel = ({
   }, [externalBBox, mapTypeList, maxTilesBudget, maxZoom, minZoom, onBudgetBBoxChange, region]);
 
   const handleEstimate = async () => {
-    const res = await fetch(`${apiBase}/tiles/estimate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (res.ok) {
+    setEstimateError(null);
+    try {
+      const res = await fetch(`${apiBase}/tiles/estimate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        setEstimate(null);
+        setEstimateError(`Estimate failed (${res.status})`);
+        return;
+      }
       const data = await res.json();
-      setEstimate(data.tiles);
+      setEstimate(Number(data.tiles) || 0);
+    } catch {
+      setEstimate(null);
+      setEstimateError('Estimate failed (network)');
     }
   };
 
@@ -452,7 +465,9 @@ export const OfflineMapsPanel = ({
           </div>
 
           <div className="rounded-lg border border-border/60 bg-background/60 p-3 text-xs text-muted-foreground space-y-1">
-            <div>Estimate: {estimate ? estimate.toLocaleString() : '—'} tiles</div>
+            <div>Estimate: {estimate !== null ? estimate.toLocaleString() : '-'} tiles</div>
+            <div>Size (est.): {estimatedSizeGb !== null ? estimatedSizeGb.toFixed(2) : '-'} GB</div>
+            {estimateError && <div>Estimate error: {estimateError}</div>}
             <div>Queue: {status?.state ?? 'idle'} • Progress: {status?.progress ?? 0}%</div>
             <div>Downloaded: {status?.downloaded ?? 0} / {status?.total ?? 0}</div>
           </div>

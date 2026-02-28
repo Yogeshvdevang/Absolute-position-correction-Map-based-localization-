@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { ScrollArea } from './ui/scroll-area';
@@ -23,6 +24,17 @@ const ControlRow = ({ label, children }: { label: string; children: ReactNode })
 );
 
 export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) => {
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const [modelFileName, setModelFileName] = useState<string | null>(null);
+
+  const handleModelPick = () => {
+    modelInputRef.current?.click();
+  };
+
+  const handleModelChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
+    const file = event.target.files?.[0];
+    setModelFileName(file ? file.name : null);
+  };
   return (
     <div className="h-full flex flex-col bg-panel border-r border-panel-border">
       <div className="p-3 border-b border-panel-border">
@@ -159,7 +171,19 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                 <div className="space-y-3">
                   <SectionLabel>Model</SectionLabel>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button variant="outline" size="sm">Load Model</Button>
+                    <div className="space-y-2">
+                      <input
+                        ref={modelInputRef}
+                        type="file"
+                        accept=".onnx,.pt,.pth,.engine,.trt,.bin,.zip,.safetensors"
+                        className="hidden"
+                        onChange={handleModelChange}
+                      />
+                      <Button variant="outline" size="sm" onClick={handleModelPick}>Load Model</Button>
+                      {modelFileName && (
+                        <div className="text-[10px] text-muted-foreground truncate">Loaded: {modelFileName}</div>
+                      )}
+                    </div>
                     <Select defaultValue="v1.3">
                       <SelectTrigger className="h-8 text-xs">
                         <SelectValue placeholder="Version" />
