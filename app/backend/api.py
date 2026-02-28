@@ -25,7 +25,7 @@ from .ws_camera import frame_buffer
 from .maps.raster_manager import RasterManager
 from .ai_engine.coarse_match import coarse_match
 from .ai_engine.ekf import EKF
-from .ai_engine.preprocess import preprocess_frame
+from .ai_engine.preprocess import preprocess_frame, Preprocessor
 
 # Configuration
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://localhost:8000")
@@ -131,6 +131,8 @@ apc_last_result: Optional[APCResult] = None
 apc_last_frame: Optional[APCFrame] = None
 apc_last_ts: Optional[float] = None
 apc_raster: Optional[RasterManager] = None
+apc_preprocessor: Optional[Preprocessor] = None
+apc_init_alt: Optional[float] = None
 apc_ekf = EKF()
 apc_train_status: Dict[str, Any] = {
   "state": "idle",
@@ -309,7 +311,22 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
   if img is None or apc_raster is None or frame.lat is None or frame.lon is None:
     return _mock_apc_correction(frame)
 
-  img = preprocess_frame(img, frame.yaw)
+  if apc_preprocessor is not None:
+    global apc_init_alt
+    if apc_init_alt is None and frame.alt is not None:
+      apc_init_alt = frame.alt
+    processed = apc_preprocessor.run(
+      frame=img,
+      yaw=frame.yaw,
+      lat=frame.lat,
+      lon=frame.lon,
+      baro_alt=frame.alt,
+      initial_alt=apc_init_alt
+    )
+    img = processed.get("frame") or img
+  else:
+    img = preprocess_frame(img, frame.yaw)
+
   gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
   h, w = gray.shape[:2]
   tile_size = max(32, min(h, w) // 4)
@@ -357,9 +374,12 @@ async def startup_event():
   if ortho_path and dem_path:
     try:
       global apc_raster
+      global apc_preprocessor
       apc_raster = RasterManager(ortho_path, dem_path)
+      apc_preprocessor = Preprocessor(apc_raster)
     except Exception:
       apc_raster = None
+      apc_preprocessor = None
   asyncio.create_task(_bridge_telemetry_loop())
 
 
