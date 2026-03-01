@@ -162,19 +162,8 @@ export const CanvasToolbar = ({
     animationFrameId = requestAnimationFrame(updateFPS);
     return () => cancelAnimationFrame(animationFrameId);
   }, []);
-  return <div className={`h-12 bg-transparent border-b-0 flex items-center px-3 gap-3 ${mapStyle !== 'dark' ? '[&_svg]:text-white [&_svg]:stroke-white [&_button]:bg-black/70 [&_button]:border-white/15 [&_button:hover]:bg-black/80' : ''}`}>
+  return <div className={`h-12 bg-transparent border-b-0 flex items-center px-3 gap-3 relative ${mapStyle !== 'dark' ? '[&_svg]:text-white [&_svg]:stroke-white [&_button]:bg-black/70 [&_button]:border-white/15 [&_button:hover]:bg-black/80' : ''}`}>
       {/* Back Button */}
-      
-
-      {/* Track Status */}
-      <div className="flex items-center gap-2">
-        <div className="w-5 h-5 rounded bg-green-600/20 flex items-center justify-center">
-          <MapPin className="h-3 w-3 !text-green-500 fill-green-500" />
-        </div>
-        <span className="text-sm font-semibold text-foreground">Track</span>
-        
-      </div>
-
       {/* Mission Planning */}
       <div className="flex items-center gap-1 ml-2">
         <Button variant={planningEnabled ? 'default' : 'outline'} size="sm" className={`h-8 px-3 text-xs ${planningEnabled ? 'bg-primary text-primary-foreground' : ''}`} onClick={onTogglePlanning}>
@@ -254,67 +243,9 @@ export const CanvasToolbar = ({
         </Button>
       </form>
 
-      {/* Command buttons */}
-      {onCommand && <div className="flex items-center gap-1 ml-2">
-          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('arm')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].arm : 'Select a vehicle first'} disabled={!isVehicleSelected}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="5" y="11" width="14" height="10" rx="2" />
-              <path d="M12 11V6a4 4 0 0 0-4-4H8" />
-              <circle cx="12" cy="16" r="1" />
-            </svg>
-            {DOMAIN_LABELS[vehicleDomain].arm}
-          </Button>
-          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('takeoff')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].takeoff : 'Select a vehicle first'} disabled={!isVehicleSelected}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="19" x2="12" y2="5" />
-              <polyline points="5 12 12 5 19 12" />
-              <line x1="5" y1="19" x2="19" y2="19" />
-            </svg>
-            {DOMAIN_LABELS[vehicleDomain].takeoff}
-          </Button>
-          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('land')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].land : 'Select a vehicle first'} disabled={!isVehicleSelected}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <polyline points="19 12 12 19 5 12" />
-              <line x1="5" y1="5" x2="19" y2="5" />
-            </svg>
-            {DOMAIN_LABELS[vehicleDomain].land}
-          </Button>
-          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('rtl')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].rtl : 'Select a vehicle first'} disabled={!isVehicleSelected}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 12a9 9 0 1 0 9-9" />
-              <polyline points="3 7 3 12 8 12" />
-            </svg>
-            {DOMAIN_LABELS[vehicleDomain].rtl}
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} disabled={!isVehicleSelected}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="3" />
-                  <line x1="12" y1="3" x2="12" y2="6" />
-                  <line x1="12" y1="18" x2="12" y2="21" />
-                  <line x1="3" y1="12" x2="6" y2="12" />
-                  <line x1="18" y1="12" x2="21" y2="12" />
-                </svg>
-                {DOMAIN_LABELS[vehicleDomain].mode}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-40 bg-panel border-border">
-              <DropdownMenuLabel className="text-xs text-muted-foreground capitalize">{vehicleDomain} Modes</DropdownMenuLabel>
-              <DropdownMenuSeparator className="bg-border" />
-              {DOMAIN_MODES[vehicleDomain].map(mode => <DropdownMenuItem key={mode} onClick={() => onCommand('mode', {
-            mode: mode.toLowerCase().replace(' ', '_')
-          })} className="hover:bg-secondary cursor-pointer">
-                  {mode}
-                </DropdownMenuItem>)}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>}
 
-      {/* Spacer */}
-      <div className="flex-1" />
-
+      <div className="absolute right-3 top-2 flex flex-col items-end gap-2">
+      <div className="flex items-center gap-2">
       {/* Visibility Layers */}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -473,5 +404,65 @@ export const CanvasToolbar = ({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      </div>
+
+      {/* Command buttons */}
+      {onCommand && <div className="flex flex-col items-end gap-2">
+          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('arm')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].arm : 'Select a vehicle first'} disabled={!isVehicleSelected}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="11" width="14" height="10" rx="2" />
+              <path d="M12 11V6a4 4 0 0 0-4-4H8" />
+              <circle cx="12" cy="16" r="1" />
+            </svg>
+            {DOMAIN_LABELS[vehicleDomain].arm}
+          </Button>
+          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('takeoff')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].takeoff : 'Select a vehicle first'} disabled={!isVehicleSelected}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+              <line x1="5" y1="19" x2="19" y2="19" />
+            </svg>
+            {DOMAIN_LABELS[vehicleDomain].takeoff}
+          </Button>
+          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('land')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].land : 'Select a vehicle first'} disabled={!isVehicleSelected}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <polyline points="19 12 12 19 5 12" />
+              <line x1="5" y1="5" x2="19" y2="5" />
+            </svg>
+            {DOMAIN_LABELS[vehicleDomain].land}
+          </Button>
+          <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('rtl')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].rtl : 'Select a vehicle first'} disabled={!isVehicleSelected}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9" />
+              <polyline points="3 7 3 12 8 12" />
+            </svg>
+            {DOMAIN_LABELS[vehicleDomain].rtl}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} disabled={!isVehicleSelected}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <line x1="12" y1="3" x2="12" y2="6" />
+                  <line x1="12" y1="18" x2="12" y2="21" />
+                  <line x1="3" y1="12" x2="6" y2="12" />
+                  <line x1="18" y1="12" x2="21" y2="12" />
+                </svg>
+                {DOMAIN_LABELS[vehicleDomain].mode}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-40 bg-panel border-border">
+              <DropdownMenuLabel className="text-xs text-muted-foreground capitalize">{vehicleDomain} Modes</DropdownMenuLabel>
+              <DropdownMenuSeparator className="bg-border" />
+              {DOMAIN_MODES[vehicleDomain].map(mode => <DropdownMenuItem key={mode} onClick={() => onCommand('mode', {
+            mode: mode.toLowerCase().replace(' ', '_')
+          })} className="hover:bg-secondary cursor-pointer">
+                  {mode}
+                </DropdownMenuItem>)}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>}
+      </div>
     </div>;
 };
