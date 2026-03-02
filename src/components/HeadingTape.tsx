@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useLayoutEffect, useMemo, useRef } from 'react';
 
 interface HeadingTapeProps {
   bearing: number;
@@ -17,6 +17,18 @@ const CARDINAL_LABELS: Record<number, string> = {
 };
 
 export const HeadingTape = ({ bearing }: HeadingTapeProps) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const height = containerRef.current?.offsetHeight ?? 0;
+    const offset = height ? `${height + 8}px` : '12px';
+    root.style.setProperty('--heading-offset', offset);
+    return () => {
+      root.style.setProperty('--heading-offset', '12px');
+    };
+  }, []);
+
+
   // Normalize bearing to 0-360
   const normalizedBearing = ((bearing % 360) + 360) % 360;
   
@@ -43,7 +55,7 @@ export const HeadingTape = ({ bearing }: HeadingTapeProps) => {
   }, []);
 
   return (
-    <div className="absolute top-0 left-0 right-0 z-20 flex flex-col items-center px-4 pt-2">
+    <div ref={containerRef} className="absolute top-0 left-0 right-0 z-20 flex flex-col items-center px-4 pt-2">
       {/* Tape container - full width */}
       <div className="relative w-full h-10 overflow-hidden bg-black/70 border border-white/20 rounded-md">
         {/* Gradient masks for edges */}

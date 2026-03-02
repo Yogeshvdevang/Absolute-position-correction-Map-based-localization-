@@ -182,6 +182,8 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_ZOOM);
   const [pitch, setPitch] = useState(0);
   const [is3d, setIs3d] = useState(false);
+
+
   const [scaleLabel, setScaleLabel] = useState('200 mi');
   const [scaleWidth, setScaleWidth] = useState(80);
   const dragStateRef = useRef<{ type: 'vertex'; index: number } | null>(null);

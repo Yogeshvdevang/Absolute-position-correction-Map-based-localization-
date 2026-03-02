@@ -910,7 +910,7 @@ export const MissionCanvas = ({
       {!connected}
       
       <div className="flex-1 relative">
-        <div className="absolute top-3 left-3 right-3 z-10">
+        <div className="absolute left-3 right-3 z-10" style={{ top: 'var(--heading-offset, 12px)' }}>
           <CanvasToolbar 
             connected={connected} 
             entityCount={entities.length} 

@@ -406,8 +406,9 @@ export const CanvasToolbar = ({
       </DropdownMenu>
       </div>
 
+      </div>
       {/* Command buttons */}
-      {onCommand && <div className="flex flex-col items-end gap-2">
+      {onCommand && <div className="fixed right-4 top-1/2 -translate-y-1/2 flex flex-col items-end gap-2 z-20">
           <Button size="sm" variant="outline" className={`h-8 px-2 text-xs gap-1 ${!isVehicleSelected ? 'opacity-50' : ''}`} onClick={() => onCommand('arm')} title={isVehicleSelected ? DOMAIN_TOOLTIPS[vehicleDomain].arm : 'Select a vehicle first'} disabled={!isVehicleSelected}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="5" y="11" width="14" height="10" rx="2" />
@@ -463,6 +464,6 @@ export const CanvasToolbar = ({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>}
-      </div>
+
     </div>;
 };
