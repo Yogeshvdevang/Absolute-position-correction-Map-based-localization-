@@ -5,9 +5,10 @@ interface VerticalAppBarProps {
   onBack: () => void;
   onPanelSelect: (panel: string) => void;
   activePanel: string | null;
+  onOpenProtocolSim?: () => void;
 }
 
-export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel }: VerticalAppBarProps) => {
+export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel, onOpenProtocolSim }: VerticalAppBarProps) => {
   const getButtonClass = (panel: string) => 
     `h-10 w-10 p-0 hover:bg-white/10 hover:text-white ${activePanel === panel ? 'text-white ring-1 ring-white/40' : ''}`;
 
@@ -44,7 +45,13 @@ export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel }: VerticalA
         variant="ghost" 
         size="sm" 
         className={getButtonClass('sim-generator')}
-        onClick={() => onPanelSelect('sim-generator')}
+        onClick={() => {
+          if (onOpenProtocolSim) {
+            onOpenProtocolSim();
+            return;
+          }
+          onPanelSelect('sim-generator');
+        }}
       >
         <PlaneTakeoff className="h-5 w-5" />
       </Button>

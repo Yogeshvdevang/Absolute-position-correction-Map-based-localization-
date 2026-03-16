@@ -12,6 +12,10 @@ interface MapBasedModulePanelProps {
   onOpenAssets?: () => void;
 }
 
+const DEFAULT_WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
+const DEFAULT_LIVE_FEED_URL = `${DEFAULT_WS_BASE}/camera`;
+const DEFAULT_TELEMETRY_URL = `${DEFAULT_WS_BASE}/ws/telemetry`;
+
 const SectionLabel = ({ children }: { children: string }) => (
   <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">{children}</div>
 );
@@ -27,12 +31,12 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const [modelFileName, setModelFileName] = useState<string | null>(null);
 
-  const [liveFeedUrlInput, setLiveFeedUrlInput] = useState('');
-  const [liveFeedUrlSaved, setLiveFeedUrlSaved] = useState<string | null>(null);
-  const [isEditingLiveFeed, setIsEditingLiveFeed] = useState(true);
-  const [telemetryUrlInput, setTelemetryUrlInput] = useState('');
-  const [telemetryUrlSaved, setTelemetryUrlSaved] = useState<string | null>(null);
-  const [isEditingTelemetry, setIsEditingTelemetry] = useState(true);
+  const [liveFeedUrlInput, setLiveFeedUrlInput] = useState(DEFAULT_LIVE_FEED_URL);
+  const [liveFeedUrlSaved, setLiveFeedUrlSaved] = useState<string | null>(DEFAULT_LIVE_FEED_URL);
+  const [isEditingLiveFeed, setIsEditingLiveFeed] = useState(false);
+  const [telemetryUrlInput, setTelemetryUrlInput] = useState(DEFAULT_TELEMETRY_URL);
+  const [telemetryUrlSaved, setTelemetryUrlSaved] = useState<string | null>(DEFAULT_TELEMETRY_URL);
+  const [isEditingTelemetry, setIsEditingTelemetry] = useState(false);
   const [manualLat, setManualLat] = useState('');
   const [manualLon, setManualLon] = useState('');
   const [manualCompass, setManualCompass] = useState('');
@@ -48,11 +52,15 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
       setLiveFeedUrlSaved(savedFeed);
       setLiveFeedUrlInput(savedFeed);
       setIsEditingLiveFeed(false);
+    } else {
+      localStorage.setItem('chaox.liveFeedUrl', DEFAULT_LIVE_FEED_URL);
     }
     if (savedTelemetry) {
       setTelemetryUrlSaved(savedTelemetry);
       setTelemetryUrlInput(savedTelemetry);
       setIsEditingTelemetry(false);
+    } else {
+      localStorage.setItem('chaox.telemetryUrl', DEFAULT_TELEMETRY_URL);
     }
   }, []);
 
@@ -96,6 +104,10 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
     }
     if (!telemetryUrlSaved) {
       setMapMatchStatus('Set a telemetry URL first.');
+      return;
+    }
+    if (telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://')) {
+      setMapMatchStatus(`Telemetry WebSocket ready: ${telemetryUrlSaved}`);
       return;
     }
     try {
@@ -351,7 +363,7 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                     <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Drone Live Feed</div>
                     {isEditingLiveFeed ? (
                       <div className="flex gap-2">
-                        <Input className="h-8 text-xs" placeholder="https://..." value={liveFeedUrlInput} onChange={(e) => setLiveFeedUrlInput(e.target.value)} />
+                        <Input className="h-8 text-xs" placeholder={DEFAULT_LIVE_FEED_URL} value={liveFeedUrlInput} onChange={(e) => setLiveFeedUrlInput(e.target.value)} />
                         <Button size="sm" onClick={handleSaveLiveFeed}>Save</Button>
                       </div>
                     ) : (
@@ -378,7 +390,7 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                       <div className="flex gap-2">
                         {isEditingTelemetry ? (
                           <>
-                            <Input className="h-8 text-xs" placeholder="Telemetry URL" value={telemetryUrlInput} onChange={(e) => setTelemetryUrlInput(e.target.value)} />
+                            <Input className="h-8 text-xs" placeholder={DEFAULT_TELEMETRY_URL} value={telemetryUrlInput} onChange={(e) => setTelemetryUrlInput(e.target.value)} />
                             <Button size="sm" onClick={handleSaveTelemetry}>Save</Button>
                           </>
                         ) : (
