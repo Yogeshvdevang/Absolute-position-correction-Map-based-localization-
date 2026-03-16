@@ -40,6 +40,7 @@ type SimState = {
 const INSET = { width: 240, height: 160, margin: 16 };
 const MAP_TILE = { tileSize: 256, grid: 3 };
 const MAP_DEFAULT: [number, number] = [77.2090, 28.6139];
+const WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 type GroundSource = 'satellite' | 'streets';
 
 export const DroneSimView = () => {
@@ -49,9 +50,15 @@ export const DroneSimView = () => {
   const [mapZoomMin, setMapZoomMin] = useState(14);
   const [mapZoomMax, setMapZoomMax] = useState(18);
   const [mapStatus, setMapStatus] = useState('Map tiles: idle');
+  const [telemetryWsStatus, setTelemetryWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const [cameraWsStatus, setCameraWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const [telemetryWsLast, setTelemetryWsLast] = useState('No messages yet.');
   const mapSourceRef = useRef<GroundSource>('satellite');
   const mapZoomMinRef = useRef(14);
   const mapZoomMaxRef = useRef(18);
+  const telemetryWsRef = useRef<WebSocket | null>(null);
+  const cameraWsRef = useRef<WebSocket | null>(null);
+  const wsLastUpdateRef = useRef(0);
   const groundTextureRef = useRef<THREE.CanvasTexture | null>(null);
   const groundCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const groundLoadIdRef = useRef(0);
@@ -85,6 +92,72 @@ export const DroneSimView = () => {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const animRef = useRef<number | null>(null);
+
+  const telemetryWsUrl = `${WS_BASE}/ws/telemetry`;
+  const cameraWsUrl = `${WS_BASE}/camera`;
+  const buildWsHeader = () =>
+    `[WEBSOCKET: TELEMETRY]\n${telemetryWsUrl}\n[WEBSOCKET: BOTTOM CAMERA]\n${cameraWsUrl}\n\n`;
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.style.position = 'fixed';
+      el.style.opacity = '0';
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+  };
+
+  const connectTelemetryWs = () => {
+    if (telemetryWsRef.current) telemetryWsRef.current.close();
+    setTelemetryWsStatus('connecting');
+    const ws = new WebSocket(telemetryWsUrl);
+    telemetryWsRef.current = ws;
+    ws.onopen = () => setTelemetryWsStatus('connected');
+    ws.onerror = () => setTelemetryWsStatus('error');
+    ws.onclose = () => setTelemetryWsStatus('disconnected');
+    ws.onmessage = (event) => {
+      const now = performance.now();
+      if (now - wsLastUpdateRef.current < 200) return;
+      wsLastUpdateRef.current = now;
+      if (typeof event.data === 'string') {
+        setTelemetryWsLast(event.data.slice(0, 240));
+      } else if (event.data instanceof Blob) {
+        setTelemetryWsLast(`Binary message (${event.data.size} bytes)`);
+      } else if (event.data instanceof ArrayBuffer) {
+        setTelemetryWsLast(`Binary message (${event.data.byteLength} bytes)`);
+      } else {
+        setTelemetryWsLast('Message received.');
+      }
+    };
+  };
+
+  const disconnectTelemetryWs = () => {
+    telemetryWsRef.current?.close();
+    telemetryWsRef.current = null;
+    setTelemetryWsStatus('disconnected');
+  };
+
+  const connectCameraWs = () => {
+    if (cameraWsRef.current) cameraWsRef.current.close();
+    setCameraWsStatus('connecting');
+    const ws = new WebSocket(cameraWsUrl);
+    cameraWsRef.current = ws;
+    ws.onopen = () => setCameraWsStatus('connected');
+    ws.onerror = () => setCameraWsStatus('error');
+    ws.onclose = () => setCameraWsStatus('disconnected');
+  };
+
+  const disconnectCameraWs = () => {
+    cameraWsRef.current?.close();
+    cameraWsRef.current = null;
+    setCameraWsStatus('disconnected');
+  };
 
   const stateRef = useRef<SimState>({
     flying: false,
@@ -543,7 +616,7 @@ export const DroneSimView = () => {
     state.axisGroup?.position.set(0, 0, 0);
     state.trailPoints = [];
     state.trailLine?.geometry.setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
-    if (streamRef.current) streamRef.current.textContent = 'Simulation Reset.';
+    if (streamRef.current) streamRef.current.textContent = `${buildWsHeader()}Simulation Reset.`;
     if (statusRef.current) {
       statusRef.current.textContent = 'Ready';
       statusRef.current.style.color = '#38bdf8';
@@ -722,7 +795,7 @@ export const DroneSimView = () => {
 
     const generateDataPacket = (lat: number, lon: number, alt: number) => {
       const mode = modeRef.current?.value ?? 'GPS_INPUT';
-      let text = '';
+      let text = buildWsHeader();
       const vx = state.velocity.x;
       const vz = -state.velocity.z;
       const vy = state.velocity.y;
@@ -1044,6 +1117,8 @@ export const DroneSimView = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       if (animRef.current) cancelAnimationFrame(animRef.current);
+      telemetryWsRef.current?.close();
+      cameraWsRef.current?.close();
       controls.dispose();
       renderer.dispose();
       scene.clear();
@@ -1172,9 +1247,51 @@ export const DroneSimView = () => {
 
         <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
           <div className="sec-title">
-            5. Data Stream Output <span style={{ fontSize: 9 }}>(Live Packet)</span>
+            <span>5. Data Stream Output <span style={{ fontSize: 9 }}>(Live Packet)</span></span>
+            <div className="drone-sim__copy-buttons">
+              <button
+                type="button"
+                className="drone-sim__copy-btn"
+                onClick={() => copyToClipboard(telemetryWsUrl)}
+              >
+                Copy Telemetry WS
+              </button>
+              <button
+                type="button"
+                className="drone-sim__copy-btn"
+                onClick={() => copyToClipboard(cameraWsUrl)}
+              >
+                Copy Camera WS
+              </button>
+            </div>
           </div>
-          <div ref={streamRef} className="drone-sim__data-stream">Select a mode and Launch...</div>
+          <div ref={streamRef} className="drone-sim__data-stream">
+            {`${buildWsHeader()}Select a mode and Launch...`}
+          </div>
+          <div className="drone-sim__ws-tester">
+            <div className="drone-sim__ws-row">
+              <div className={`drone-sim__ws-status drone-sim__ws-status--${telemetryWsStatus}`}>
+                Telemetry: {telemetryWsStatus}
+              </div>
+              <div className="drone-sim__ws-actions">
+                <button type="button" className="drone-sim__ws-btn" onClick={connectTelemetryWs}>Connect</button>
+                <button type="button" className="drone-sim__ws-btn" onClick={disconnectTelemetryWs}>Disconnect</button>
+              </div>
+            </div>
+            <div className="drone-sim__ws-last">{telemetryWsLast}</div>
+            <div className="drone-sim__ws-row">
+              <div className={`drone-sim__ws-status drone-sim__ws-status--${cameraWsStatus}`}>
+                Camera: {cameraWsStatus}
+              </div>
+              <div className="drone-sim__ws-actions">
+                <button type="button" className="drone-sim__ws-btn" onClick={connectCameraWs}>Connect</button>
+                <button type="button" className="drone-sim__ws-btn" onClick={disconnectCameraWs}>Disconnect</button>
+              </div>
+            </div>
+            <div className="drone-sim__ws-note">
+              Camera WS expects the client to stream JPEG frames. This tester only opens the socket.
+            </div>
+          </div>
         </div>
       </div>
 
