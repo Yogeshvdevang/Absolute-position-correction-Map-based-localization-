@@ -1,0 +1,352 @@
+.drone-sim {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --accent: #38bdf8;
+  --success: #4ade80;
+  --warning: #facc15;
+  --text: #f1f5f9;
+  --input: #334155;
+  --border: #475569;
+  font-family: "Segoe UI", monospace;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.drone-sim__sidebar {
+  width: 400px;
+  background: var(--panel);
+  padding: 20px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  box-shadow: 4px 0 15px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+}
+
+.drone-sim .header {
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.drone-sim h1 {
+  margin: 0;
+  font-size: 20px;
+  color: var(--accent);
+  letter-spacing: 1px;
+}
+
+.drone-sim .subtitle {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.drone-sim .section {
+  background: #0f172a;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.drone-sim .sec-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.drone-sim .input-group {
+  margin-bottom: 8px;
+}
+
+.drone-sim .input-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5px;
+}
+
+.drone-sim label {
+  display: block;
+  font-size: 10px;
+  color: #cbd5e1;
+  margin-bottom: 2px;
+}
+
+.drone-sim input,
+.drone-sim select {
+  width: 100%;
+  background: var(--input);
+  border: 1px solid var(--border);
+  color: white;
+  padding: 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  box-sizing: border-box;
+}
+
+.drone-sim input:focus,
+.drone-sim select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.drone-sim input[type="range"] {
+  flex: 1;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.drone-sim__range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drone-sim__range-value {
+  font-size: 10px;
+  color: #94a3b8;
+  min-width: 36px;
+  text-align: right;
+}
+
+.drone-sim .btn-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 5px;
+}
+
+.drone-sim button {
+  padding: 10px;
+  border: none;
+  border-radius: 6px;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: uppercase;
+  transition: all 0.2s;
+}
+
+.drone-sim .btn-auto {
+  background: #6366f1;
+  color: white;
+  grid-column: span 2;
+}
+
+.drone-sim .btn-auto:hover {
+  background: #4f46e5;
+}
+
+.drone-sim .btn-launch {
+  background: var(--success);
+  color: #022c22;
+}
+
+.drone-sim .btn-launch:hover {
+  background: #22c55e;
+}
+
+.drone-sim .btn-pause {
+  background: var(--warning);
+  color: #422006;
+}
+
+.drone-sim .btn-pause:hover {
+  background: #eab308;
+}
+
+.drone-sim .btn-reset {
+  background: #ef4444;
+  color: white;
+}
+
+.drone-sim .btn-reset:hover {
+  background: #dc2626;
+}
+
+.drone-sim .btn-follow {
+  background: #334155;
+  color: #94a3b8;
+  border: 1px solid #475569;
+}
+
+.drone-sim .btn-follow.active {
+  background: var(--accent);
+  color: #0f172a;
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+}
+
+.drone-sim .btn-home {
+  background: #0ea5e9;
+  color: white;
+}
+
+.drone-sim .btn-home:hover {
+  background: #0284c7;
+}
+
+.drone-sim .btn-manual {
+  background: #22d3ee;
+  color: #0f172a;
+  grid-column: span 2;
+}
+
+.drone-sim .btn-manual.active {
+  background: #06b6d4;
+}
+
+.drone-sim__manual-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.drone-sim__data-stream {
+  background: #000;
+  color: #22c55e;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 10px;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #14532d;
+  height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.drone-sim__viewport {
+  flex-grow: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+.drone-sim__overlay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: white;
+  font-size: 12px;
+  text-align: right;
+  pointer-events: none;
+  z-index: 50;
+  text-shadow: 0 0 5px black;
+}
+
+.drone-sim__legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drone-sim__legend-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.drone-sim__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.drone-sim__swatch--vel {
+  background: #00ff00;
+}
+
+.drone-sim__swatch--acc {
+  background: #ff0000;
+}
+
+.drone-sim__swatch--trail {
+  background: #ffff00;
+}
+
+.drone-sim__swatch--xpos {
+  background: #00ff00;
+}
+
+.drone-sim__swatch--xneg {
+  background: #ffffff;
+}
+
+.drone-sim__swatch--ypos {
+  background: #ff0000;
+}
+
+.drone-sim__swatch--yneg {
+  background: #0000ff;
+}
+
+.drone-sim .label-marker {
+  position: absolute;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 10px;
+  border-radius: 4px;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  display: none;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  z-index: 40;
+}
+
+.drone-sim .label-title {
+  color: var(--accent);
+  font-weight: bold;
+  margin-bottom: 2px;
+  border-bottom: 1px solid #334155;
+  padding-bottom: 2px;
+}
+
+.drone-sim .label-coord {
+  color: #94a3b8;
+  font-family: monospace;
+}
+
+.drone-sim__camera-feed {
+  position: absolute;
+  border: 1px solid rgba(56, 189, 248, 0.8);
+  border-radius: 8px;
+  overflow: hidden;
+  pointer-events: none;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.drone-sim__camera-label {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  font-size: 10px;
+  color: #e2e8f0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}

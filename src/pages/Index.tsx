@@ -6,6 +6,7 @@ import { RightToolbar } from '@/components/RightToolbar';
 import { VideoFeedPanel } from '@/components/VideoFeedPanel';
 import { EntityDetailPanel } from '@/components/EntityDetailPanel';
 import { TrackDetailPanel } from '@/components/TrackDetailPanel';
+import { DroneSimView } from '@/components/DroneSimView';
 import { Entity } from '@/types/entity';
 import { Track, TrackDisposition } from '@/types/track';
 
@@ -224,6 +225,9 @@ const Index = () => {
     );
   };
 
+  const isSimView = activePanel === 'sim-generator';
+  const showLeftPanel = Boolean(activePanel && !isSimView);
+
   return (
     <div 
       className="bg-background overflow-hidden"
@@ -240,7 +244,7 @@ const Index = () => {
             <VerticalAppBar onBack={handleBack} onPanelSelect={handlePanelSelect} activePanel={activePanel} />
           </div>
           
-          {activePanel && (
+          {showLeftPanel && (
             <div className="w-72 flex-shrink-0">
               <UnifiedPanel 
                 activePanel={activePanel}
@@ -266,25 +270,29 @@ const Index = () => {
           
           <div className="flex-1 flex flex-col min-w-0">
             <div className="flex-1 min-h-0">
-              <MissionCanvas 
-                selectedEntity={selectedEntity}
-                onEntitySelect={handleEntitySelect}
-                onEntitiesUpdate={setEntities}
-                offlineDrawActive={offlineDrawActive}
-                offlineBBox={offlineBBox}
-                onOfflineBBoxChange={setOfflineBBox}
-                onOfflineDrawActiveChange={setOfflineDrawActive}
-                onMapZoomChange={setMapZoom}
-                budgetBBox={budgetBBox}
-                onRegisterSnapshot={(fn) => {
-                  snapshotGetterRef.current = fn;
-                }}
-              />
+              {isSimView ? (
+                <DroneSimView />
+              ) : (
+                <MissionCanvas 
+                  selectedEntity={selectedEntity}
+                  onEntitySelect={handleEntitySelect}
+                  onEntitiesUpdate={setEntities}
+                  offlineDrawActive={offlineDrawActive}
+                  offlineBBox={offlineBBox}
+                  onOfflineBBoxChange={setOfflineBBox}
+                  onOfflineDrawActiveChange={setOfflineDrawActive}
+                  onMapZoomChange={setMapZoom}
+                  budgetBBox={budgetBBox}
+                  onRegisterSnapshot={(fn) => {
+                    snapshotGetterRef.current = fn;
+                  }}
+                />
+              )}
             </div>
-            {isVideoFeedOpen && <VideoFeedPanel />}
+            {!isSimView && isVideoFeedOpen && <VideoFeedPanel />}
           </div>
           
-          {(isDetailPanelOpen || selectedTrack) && (
+          {!isSimView && (isDetailPanelOpen || selectedTrack) && (
             <>
               <div className="w-80 flex-shrink-0">
                 {selectedTrack ? (

@@ -1,4 +1,4 @@
-import { Crosshair, Eye, Globe, Layers, SlidersHorizontal } from 'lucide-react';
+import { Crosshair, Eye, Globe, Layers, PlaneTakeoff, SlidersHorizontal } from 'lucide-react';
 import { Button } from './ui/button';
 
 interface VerticalAppBarProps {
@@ -38,6 +38,15 @@ export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel }: VerticalA
         onClick={() => onPanelSelect('training')}
       >
         <SlidersHorizontal className="h-5 w-5" />
+      </Button>
+
+      <Button 
+        variant="ghost" 
+        size="sm" 
+        className={getButtonClass('sim-generator')}
+        onClick={() => onPanelSelect('sim-generator')}
+      >
+        <PlaneTakeoff className="h-5 w-5" />
       </Button>
 
       <Button 
