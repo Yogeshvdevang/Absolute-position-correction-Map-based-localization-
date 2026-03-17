@@ -45,6 +45,12 @@ type MissionPreset = {
   radiusM: number;
 };
 
+type ManualInputMode = 'rc' | 'keyboard' | 'joystick';
+type RcProfileId = 'flysky-fsi6' | 'radiomaster-pocket';
+type CalibrationPanel = 'none' | 'rc' | 'joystick';
+type AxisKey = 'roll' | 'pitch' | 'yaw' | 'throttle';
+type AxisCalibration = { min: number; center: number; max: number };
+
 const INSET = { width: 240, height: 160, margin: 16 };
 const MAP_TILE = { tileSize: 256, grid: 3 };
 const MISSION_PRESETS: MissionPreset[] = [
@@ -66,7 +72,44 @@ const MISSION_PRESETS: MissionPreset[] = [
 const DEFAULT_PRESET = MISSION_PRESETS[0];
 const MAP_DEFAULT: [number, number] = [DEFAULT_PRESET.lon, DEFAULT_PRESET.lat];
 const WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
+const API_BASE = import.meta.env.VITE_BACKEND_BASE || WS_BASE.replace(/^ws/i, 'http');
 type GroundSource = 'satellite' | 'streets';
+const RC_PROFILES: Array<{
+  id: RcProfileId;
+  label: string;
+  protocol: string;
+  notes: string;
+  channels: Array<{ channel: string; function: string; range: string }>;
+}> = [
+  {
+    id: 'flysky-fsi6',
+    label: 'FlySky FS-i6',
+    protocol: 'AFHDS 2A / PWM, iBus, PPM',
+    notes: 'Use a dedicated model memory for the simulator and keep expo disabled while calibrating endpoints.',
+    channels: [
+      { channel: 'CH1', function: 'Roll / Aileron', range: '1000-2000 us' },
+      { channel: 'CH2', function: 'Pitch / Elevator', range: '1000-2000 us' },
+      { channel: 'CH3', function: 'Throttle', range: '1000-2000 us' },
+      { channel: 'CH4', function: 'Yaw / Rudder', range: '1000-2000 us' },
+      { channel: 'CH5', function: 'Flight Mode', range: '2-position or 3-position switch' },
+      { channel: 'CH6', function: 'Arm / Aux', range: '2-position switch' }
+    ]
+  },
+  {
+    id: 'radiomaster-pocket',
+    label: 'Radiomaster Pocket',
+    protocol: 'EdgeTX / ELRS or multi-module output',
+    notes: 'Run EdgeTX stick calibration first on the radio, then validate the model mixer output in the simulator.',
+    channels: [
+      { channel: 'CH1', function: 'Roll / Aileron', range: '1000-2000 us' },
+      { channel: 'CH2', function: 'Pitch / Elevator', range: '1000-2000 us' },
+      { channel: 'CH3', function: 'Throttle', range: '1000-2000 us' },
+      { channel: 'CH4', function: 'Yaw / Rudder', range: '1000-2000 us' },
+      { channel: 'CH5', function: 'Flight Mode', range: '3-position switch' },
+      { channel: 'CH6', function: 'Arm / Aux', range: 'Momentary or 2-position switch' }
+    ]
+  }
+];
 
 export const DroneSimView = () => {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -76,6 +119,35 @@ export const DroneSimView = () => {
   const [mapZoomMax, setMapZoomMax] = useState(18);
   const [mapStatus, setMapStatus] = useState('Map tiles: idle');
   const [missionPresetId, setMissionPresetId] = useState<MissionPreset['id']>(DEFAULT_PRESET.id);
+  const [manualInputMode, setManualInputMode] = useState<ManualInputMode>('keyboard');
+  const [manualControlStatus, setManualControlStatus] = useState('Keyboard control active.');
+  const [calibrationPanel, setCalibrationPanel] = useState<CalibrationPanel>('none');
+  const [rcProfileId, setRcProfileId] = useState<RcProfileId>('flysky-fsi6');
+  const [rcStickMode, setRcStickMode] = useState<1 | 2>(2);
+  const [axisReverse, setAxisReverse] = useState<Record<AxisKey, boolean>>({
+    roll: false,
+    pitch: false,
+    yaw: false,
+    throttle: false,
+  });
+  const [gamepadConnected, setGamepadConnected] = useState(false);
+  const [gamepadName, setGamepadName] = useState('No controller detected');
+  const [rcPwm, setRcPwm] = useState<Record<AxisKey, number>>({
+    roll: 1500,
+    pitch: 1500,
+    yaw: 1500,
+    throttle: 1000,
+  });
+  const [rcAuxPwm, setRcAuxPwm] = useState<number[]>([1518, 964, 1998, 0, 0, 0, 0, 0, 0, 0]);
+  const [joystickMonitorValues, setJoystickMonitorValues] = useState<number[]>([50, 50, 50, 50, 50, 50]);
+  const [rcCalibrationRunning, setRcCalibrationRunning] = useState(false);
+  const [rcCalibrationMessage, setRcCalibrationMessage] = useState('Ready to capture radio endpoints.');
+  const [rcCalibrationData, setRcCalibrationData] = useState<Record<AxisKey, AxisCalibration>>({
+    roll: { min: 1000, center: 1500, max: 2000 },
+    pitch: { min: 1000, center: 1500, max: 2000 },
+    yaw: { min: 1000, center: 1500, max: 2000 },
+    throttle: { min: 1000, center: 1000, max: 2000 },
+  });
   const [telemetryWsStatus, setTelemetryWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [cameraWsStatus, setCameraWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [telemetryWsLast, setTelemetryWsLast] = useState('No messages yet.');
@@ -119,6 +191,27 @@ export const DroneSimView = () => {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const animRef = useRef<number | null>(null);
+  const gamepadAxesRef = useRef<Record<AxisKey, number>>({
+    roll: 0,
+    pitch: 0,
+    yaw: 0,
+    throttle: -1,
+  });
+  const manualInputModeRef = useRef<ManualInputMode>('keyboard');
+  const gamepadConnectedRef = useRef(false);
+  const axisReverseRef = useRef<Record<AxisKey, boolean>>({
+    roll: false,
+    pitch: false,
+    yaw: false,
+    throttle: false,
+  });
+  const rcStatusPushRef = useRef(0);
+  const rcCalibrationCaptureRef = useRef<Record<AxisKey, AxisCalibration>>({
+    roll: { min: 1000, center: 1500, max: 2000 },
+    pitch: { min: 1000, center: 1500, max: 2000 },
+    yaw: { min: 1000, center: 1500, max: 2000 },
+    throttle: { min: 1000, center: 1000, max: 2000 },
+  });
 
   const telemetryWsUrl = `${WS_BASE}/ws/telemetry`;
   const cameraWsUrl = `${WS_BASE}/camera`;
@@ -399,6 +492,80 @@ export const DroneSimView = () => {
       camera.updateProjectionMatrix();
       bottomHelperRef.current?.update();
     }
+  };
+
+  const handleManualInputModeChange = (mode: ManualInputMode) => {
+    setManualInputMode(mode);
+    const state = stateRef.current;
+    if ((mode === 'rc' || mode === 'joystick') && !state.manualMode) {
+      toggleManual();
+    }
+    if (mode === 'keyboard') {
+      setManualControlStatus('Keyboard control active.');
+      return;
+    }
+    if (mode === 'rc') {
+      setManualControlStatus(gamepadConnected
+        ? 'RC mode active. Live transmitter input is driving manual flight.'
+        : 'RC mode selected. Connect the transmitter USB joystick device to drive manual flight.');
+      return;
+    }
+    setManualControlStatus(gamepadConnected
+      ? 'Joystick mode active. Live controller input is driving manual flight.'
+      : 'Joystick mode selected. Connect a joystick device to drive manual flight.');
+  };
+
+  const handleManualCalibration = (mode: Extract<ManualInputMode, 'rc' | 'joystick'>) => {
+    if (mode === 'rc') {
+      setCalibrationPanel('rc');
+      setManualControlStatus('RC calibration panel open.');
+      return;
+    }
+    setCalibrationPanel('joystick');
+    setManualControlStatus('Joystick calibration panel open.');
+  };
+
+  const toggleAxisReverse = (axis: AxisKey) => {
+    setAxisReverse((prev) => ({ ...prev, [axis]: !prev[axis] }));
+  };
+
+  const persistRcConfig = useCallback((overrides?: Partial<{
+    profile_id: RcProfileId;
+    stick_mode: 1 | 2;
+    reversed: Record<AxisKey, boolean>;
+    calibration: Record<AxisKey, AxisCalibration>;
+  }>) => {
+    fetch(`${API_BASE}/rc/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile_id: overrides?.profile_id ?? rcProfileId,
+        stick_mode: overrides?.stick_mode ?? rcStickMode,
+        reversed: overrides?.reversed ?? axisReverse,
+        calibration: overrides?.calibration ?? rcCalibrationData,
+      }),
+    }).catch(() => undefined);
+  }, [axisReverse, rcCalibrationData, rcProfileId, rcStickMode]);
+
+  const handleRcCalibrationAction = () => {
+    if (!rcCalibrationRunning) {
+      const seed: Record<AxisKey, AxisCalibration> = {
+        roll: { min: rcPwm.roll, center: rcPwm.roll, max: rcPwm.roll },
+        pitch: { min: rcPwm.pitch, center: rcPwm.pitch, max: rcPwm.pitch },
+        yaw: { min: rcPwm.yaw, center: rcPwm.yaw, max: rcPwm.yaw },
+        throttle: { min: rcPwm.throttle, center: rcPwm.throttle, max: rcPwm.throttle },
+      };
+      rcCalibrationCaptureRef.current = seed;
+      setRcCalibrationRunning(true);
+      setRcCalibrationMessage('Calibration started. Move every stick through full travel, then click Finish Calibration.');
+      return;
+    }
+
+    const captured = rcCalibrationCaptureRef.current;
+    setRcCalibrationData(captured);
+    setRcCalibrationRunning(false);
+    setRcCalibrationMessage('Calibration saved. Min / center / max endpoints updated from live transmitter input.');
+    persistRcConfig({ calibration: captured });
   };
 
   const handleMapSourceChange = (value: GroundSource) => {
@@ -682,6 +849,162 @@ export const DroneSimView = () => {
   }, [applyMissionPreset]);
 
   useEffect(() => {
+    manualInputModeRef.current = manualInputMode;
+  }, [manualInputMode]);
+
+  useEffect(() => {
+    gamepadConnectedRef.current = gamepadConnected;
+  }, [gamepadConnected]);
+
+  useEffect(() => {
+    axisReverseRef.current = axisReverse;
+  }, [axisReverse]);
+
+  const activeRcProfile = RC_PROFILES.find((profile) => profile.id === rcProfileId) ?? RC_PROFILES[0];
+  const rcMonitorValues = rcAuxPwm.map((value) => Math.max(0, Math.min(100, ((value - 1000) / 1000) * 100)));
+
+  useEffect(() => {
+    let mounted = true;
+    fetch(`${API_BASE}/rc/config`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!mounted || !data) return;
+        if (data.profile_id) setRcProfileId(data.profile_id as RcProfileId);
+        if (data.stick_mode === 1 || data.stick_mode === 2) setRcStickMode(data.stick_mode);
+        if (data.reversed) {
+          setAxisReverse({
+            roll: Boolean(data.reversed.roll),
+            pitch: Boolean(data.reversed.pitch),
+            yaw: Boolean(data.reversed.yaw),
+            throttle: Boolean(data.reversed.throttle),
+          });
+        }
+        if (data.calibration) {
+          const nextCalibration = {
+            roll: data.calibration.roll ?? { min: 1000, center: 1500, max: 2000 },
+            pitch: data.calibration.pitch ?? { min: 1000, center: 1500, max: 2000 },
+            yaw: data.calibration.yaw ?? { min: 1000, center: 1500, max: 2000 },
+            throttle: data.calibration.throttle ?? { min: 1000, center: 1000, max: 2000 },
+          };
+          setRcCalibrationData(nextCalibration);
+          rcCalibrationCaptureRef.current = nextCalibration;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    persistRcConfig();
+  }, [axisReverse, persistRcConfig, rcProfileId, rcStickMode]);
+
+  useEffect(() => {
+    let rafId = 0;
+    const toPwm = (value: number, axis: AxisKey) => {
+      const next = axisReverse[axis] ? -value : value;
+      if (axis === 'throttle') {
+        const normalized = (1 - next) / 2;
+        return Math.round(1000 + normalized * 1000);
+      }
+      return Math.round(1500 + next * 500);
+    };
+
+    const update = () => {
+      const pads = navigator.getGamepads?.() ?? [];
+      const pad = pads.find(Boolean) ?? null;
+      if (pad) {
+        setGamepadConnected(true);
+        setGamepadName(pad.id || 'Generic Gamepad');
+
+        const yawFallbackCandidates = [pad.axes[3], pad.axes[4], pad.axes[5]]
+          .map((value, index) => ({ value: value ?? 0, axisIndex: index + 3 }))
+          .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+        const yawAxis = yawFallbackCandidates[0]?.value ?? 0;
+
+        const axes: Record<AxisKey, number> = {
+          roll: pad.axes[0] ?? 0,
+          pitch: pad.axes[1] ?? 0,
+          throttle: pad.axes[2] ?? -1,
+          yaw: Math.abs(yawAxis) > 0.05 ? yawAxis : 0,
+        };
+        gamepadAxesRef.current = axes;
+
+        const pwm = {
+          roll: toPwm(axes.roll, 'roll'),
+          pitch: toPwm(axes.pitch, 'pitch'),
+          yaw: toPwm(axes.yaw, 'yaw'),
+          throttle: toPwm(axes.throttle, 'throttle'),
+        };
+        setRcPwm(pwm);
+        if (rcCalibrationRunning) {
+          const nextCapture: Record<AxisKey, AxisCalibration> = {
+            roll: {
+              min: Math.min(rcCalibrationCaptureRef.current.roll.min, pwm.roll),
+              center: rcCalibrationCaptureRef.current.roll.center,
+              max: Math.max(rcCalibrationCaptureRef.current.roll.max, pwm.roll),
+            },
+            pitch: {
+              min: Math.min(rcCalibrationCaptureRef.current.pitch.min, pwm.pitch),
+              center: rcCalibrationCaptureRef.current.pitch.center,
+              max: Math.max(rcCalibrationCaptureRef.current.pitch.max, pwm.pitch),
+            },
+            yaw: {
+              min: Math.min(rcCalibrationCaptureRef.current.yaw.min, pwm.yaw),
+              center: rcCalibrationCaptureRef.current.yaw.center,
+              max: Math.max(rcCalibrationCaptureRef.current.yaw.max, pwm.yaw),
+            },
+            throttle: {
+              min: Math.min(rcCalibrationCaptureRef.current.throttle.min, pwm.throttle),
+              center: rcCalibrationCaptureRef.current.throttle.center,
+              max: Math.max(rcCalibrationCaptureRef.current.throttle.max, pwm.throttle),
+            },
+          };
+          rcCalibrationCaptureRef.current = nextCapture;
+        }
+
+        const aux = Array.from({ length: 10 }, (_, index) => {
+          const button = pad.buttons[index];
+          return Math.round(1000 + (button?.value ?? 0) * 1000);
+        });
+        setRcAuxPwm(aux);
+        setJoystickMonitorValues([
+          ((axes.roll + 1) / 2) * 100,
+          ((axes.pitch + 1) / 2) * 100,
+          ((axes.throttle + 1) / 2) * 100,
+          ((axes.yaw + 1) / 2) * 100,
+          ((pad.axes[4] ?? 0) + 1) * 50,
+          ((pad.axes[5] ?? 0) + 1) * 50,
+        ]);
+
+        const now = performance.now();
+        if (now - rcStatusPushRef.current > 250) {
+          rcStatusPushRef.current = now;
+          fetch(`${API_BASE}/rc/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              connected: true,
+              gamepad_id: pad.id,
+              axes,
+              pwm,
+              buttons: Object.fromEntries(aux.map((value, index) => [`ch${index + 5}`, value])),
+            }),
+          }).catch(() => undefined);
+        }
+      } else {
+        setGamepadConnected(false);
+        setGamepadName('No controller detected');
+      }
+      rafId = window.requestAnimationFrame(update);
+    };
+
+    rafId = window.requestAnimationFrame(update);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [axisReverse, rcCalibrationRunning]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
 
@@ -923,9 +1246,22 @@ export const DroneSimView = () => {
         if (input.yawLeft) state.manualYaw -= yawRate * dt;
         if (input.yawRight) state.manualYaw += yawRate * dt;
 
-        const forward = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
-        const strafe = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-        const vertical = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+        let forward = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
+        let strafe = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+        let vertical = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+        if ((manualInputModeRef.current === 'joystick' || manualInputModeRef.current === 'rc') && gamepadConnectedRef.current) {
+          const axes = gamepadAxesRef.current;
+          const reversedAxes = {
+            roll: axisReverseRef.current.roll ? -axes.roll : axes.roll,
+            pitch: axisReverseRef.current.pitch ? -axes.pitch : axes.pitch,
+            yaw: axisReverseRef.current.yaw ? -axes.yaw : axes.yaw,
+            throttle: axisReverseRef.current.throttle ? -axes.throttle : axes.throttle,
+          };
+          strafe = Math.abs(reversedAxes.roll) > 0.08 ? reversedAxes.roll : 0;
+          forward = Math.abs(reversedAxes.pitch) > 0.08 ? -reversedAxes.pitch : 0;
+          vertical = Math.abs(reversedAxes.throttle) > 0.08 ? -reversedAxes.throttle : 0;
+          if (Math.abs(reversedAxes.yaw) > 0.08) state.manualYaw += reversedAxes.yaw * yawRate * dt;
+        }
 
         const prevPos = state.currentPos.clone();
         if (forward !== 0 || strafe !== 0) {
@@ -1263,8 +1599,57 @@ export const DroneSimView = () => {
             <button type="button" className="btn-reset" onClick={resetSim}>Reset / Stop</button>
             <button type="button" className="btn-manual" onClick={toggleManual} ref={manualBtnRef}>Manual Pilot: OFF</button>
           </div>
+          <div className="drone-sim__manual-panel">
+            <div className="drone-sim__manual-mode-grid">
+              <button
+                type="button"
+                className={`drone-sim__manual-mode-btn${manualInputMode === 'rc' ? ' active' : ''}`}
+                onClick={() => handleManualInputModeChange('rc')}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="5" y="4" width="14" height="16" rx="3" />
+                  <circle cx="9" cy="11" r="2.5" />
+                  <circle cx="15" cy="11" r="2.5" />
+                  <path d="M9 8v6M15 9v4M9 17h6" />
+                </svg>
+                <span>RC</span>
+              </button>
+              <button
+                type="button"
+                className={`drone-sim__manual-mode-btn${manualInputMode === 'keyboard' ? ' active' : ''}`}
+                onClick={() => handleManualInputModeChange('keyboard')}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="6" width="18" height="12" rx="2" />
+                  <path d="M6 10h1M9 10h1M12 10h1M15 10h1M18 10h0M6 14h6M14 14h4" />
+                </svg>
+                <span>Keyboard</span>
+              </button>
+              <button
+                type="button"
+                className={`drone-sim__manual-mode-btn${manualInputMode === 'joystick' ? ' active' : ''}`}
+                onClick={() => handleManualInputModeChange('joystick')}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="7" r="2.5" />
+                  <path d="M12 9.5V15M8 15h8M7 19h10M9 19v-4M15 19v-4" />
+                </svg>
+                <span>Joystick</span>
+              </button>
+            </div>
+            <div className="drone-sim__manual-calibration">
+              <button type="button" className="drone-sim__manual-calibrate-btn" onClick={() => handleManualCalibration('rc')}>
+                RC Calibration
+              </button>
+              <button type="button" className="drone-sim__manual-calibrate-btn" onClick={() => handleManualCalibration('joystick')}>
+                Joystick Calibration
+              </button>
+            </div>
+          </div>
           <div className="drone-sim__manual-hint">
-            Manual keys: 8 forward, 2 back, 4 left, 6 right, 7 yaw left, 9 yaw right, 5 up, 0 down.
+            {manualInputMode === 'keyboard'
+              ? 'Manual keys: 8 forward, 2 back, 4 left, 6 right, 7 yaw left, 9 yaw right, 5 up, 0 down.'
+              : manualControlStatus}
           </div>
         </div>
 
@@ -1403,6 +1788,204 @@ export const DroneSimView = () => {
           <div ref={labelEndTextRef} className="label-coord" />
         </div>
       </div>
+      {calibrationPanel !== 'none' && (
+        <div className="drone-sim__modal-backdrop">
+          <div className="drone-sim__modal drone-sim__modal--qgc">
+            {calibrationPanel === 'rc' ? (
+              <>
+                <div className="drone-sim__qgc-header">
+                  <div>
+                    <div className="drone-sim__qgc-title">Radio Setup</div>
+                    <div className="drone-sim__qgc-subtitle">
+                      Radio Setup is used to calibrate your transmitter and assign channels for Roll, Pitch, Yaw and Throttle.
+                    </div>
+                  </div>
+                  <button type="button" className="drone-sim__modal-close" onClick={() => setCalibrationPanel('none')}>
+                    ×
+                  </button>
+                </div>
+                <div className="drone-sim__radio-layout">
+                  <div className="drone-sim__radio-main">
+                    <div className="drone-sim__qgc-toolbar">
+                      <div className="drone-sim__qgc-profile">
+                        <label>RC Type</label>
+                        <select value={rcProfileId} onChange={(e) => setRcProfileId(e.target.value as RcProfileId)}>
+                          {RC_PROFILES.map((profile) => (
+                            <option key={profile.id} value={profile.id}>{profile.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="drone-sim__qgc-mode-toggle">
+                        <button type="button" className={rcStickMode === 1 ? 'active' : ''} onClick={() => setRcStickMode(1)}>Mode 1</button>
+                        <button type="button" className={rcStickMode === 2 ? 'active' : ''} onClick={() => setRcStickMode(2)}>Mode 2</button>
+                      </div>
+                    </div>
+
+                    <div className="drone-sim__radio-axis-grid">
+                      <div className="drone-sim__radio-bar drone-sim__radio-bar--horizontal">
+                        <div className="drone-sim__radio-bar-fill" style={{ width: `${((rcPwm.roll - 1000) / 1000) * 100}%` }}>
+                          <span>Roll</span>
+                          <strong>{rcPwm.roll}</strong>
+                        </div>
+                      </div>
+                      <label className="drone-sim__radio-reverse">
+                        <input type="checkbox" checked={axisReverse.roll} onChange={() => toggleAxisReverse('roll')} />
+                        <span>Reverse</span>
+                      </label>
+
+                      <div className="drone-sim__radio-vertical-wrap">
+                        <div className="drone-sim__radio-bar drone-sim__radio-bar--vertical">
+                          <div className="drone-sim__radio-bar-fill" style={{ height: `${((rcPwm.pitch - 1000) / 1000) * 100}%` }}>
+                            <span>Pitch</span>
+                            <strong>{rcPwm.pitch}</strong>
+                          </div>
+                        </div>
+                        <label className="drone-sim__radio-reverse">
+                          <input type="checkbox" checked={axisReverse.pitch} onChange={() => toggleAxisReverse('pitch')} />
+                          <span>Reverse</span>
+                        </label>
+                      </div>
+
+                      <div className="drone-sim__radio-vertical-wrap">
+                        <div className="drone-sim__radio-bar drone-sim__radio-bar--vertical">
+                          <div className="drone-sim__radio-bar-fill" style={{ height: `${((rcPwm.throttle - 1000) / 1000) * 100}%` }}>
+                            <span>Throttle</span>
+                            <strong>{rcPwm.throttle}</strong>
+                          </div>
+                        </div>
+                        <label className="drone-sim__radio-reverse">
+                          <input type="checkbox" checked={axisReverse.throttle} onChange={() => toggleAxisReverse('throttle')} />
+                          <span>Reverse</span>
+                        </label>
+                      </div>
+
+                      <div className="drone-sim__radio-bar drone-sim__radio-bar--horizontal drone-sim__radio-bar--yaw">
+                        <div className="drone-sim__radio-bar-fill" style={{ width: `${((rcPwm.yaw - 1000) / 1000) * 100}%` }}>
+                          <span>Yaw</span>
+                          <strong>{rcPwm.yaw}</strong>
+                        </div>
+                      </div>
+                      <label className="drone-sim__radio-reverse drone-sim__radio-reverse--yaw">
+                        <input type="checkbox" checked={axisReverse.yaw} onChange={() => toggleAxisReverse('yaw')} />
+                        <span>Reverse</span>
+                      </label>
+                    </div>
+
+                    <div className="drone-sim__radio-info-grid">
+                      <div className="drone-sim__radio-info-card">
+                        <div className="drone-sim__radio-info-title">Profile Notes</div>
+                        <div className="drone-sim__radio-info-body">
+                          <div><strong>Profile:</strong> {activeRcProfile.label}</div>
+                          <div><strong>Protocol:</strong> {activeRcProfile.protocol}</div>
+                          <div><strong>Controller:</strong> {gamepadConnected ? gamepadName : 'Disconnected'}</div>
+                          <div><strong>Calibration:</strong> {rcCalibrationRunning ? 'Capturing live endpoints' : 'Saved'}</div>
+                          <div>{activeRcProfile.notes}</div>
+                        </div>
+                      </div>
+
+                      <div className="drone-sim__radio-info-card">
+                        <div className="drone-sim__radio-info-title">Calibration Checklist</div>
+                        <div className="drone-sim__radio-info-body">
+                          <div>1. Reset trims and sub-trims to neutral before measuring channel centers.</div>
+                          <div>2. Check each primary axis for 1000 / 1500 / 2000 us output.</div>
+                          <div>3. Verify throttle low is stable and does not creep above idle.</div>
+                          <div>4. Assign flight mode and arm only after the four main sticks are clean.</div>
+                          <div>{rcCalibrationMessage}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="drone-sim__radio-side">
+                    <div className="drone-sim__radio-extra-grid">
+                      {[5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map((channel, index) => {
+                        return (
+                          <div key={channel} className="drone-sim__radio-bar drone-sim__radio-bar--small">
+                            <div className="drone-sim__radio-bar-fill" style={{ width: `${rcMonitorValues[index]}%` }}>
+                              <span>{`Radio ${channel}`}</span>
+                              <strong>{rcAuxPwm[index]}</strong>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="drone-sim__radio-channel-card">
+                      <div className="drone-sim__radio-info-title">Channel Mapping</div>
+                      <div className="drone-sim__radio-channel-list">
+                        {activeRcProfile.channels.map((entry) => (
+                          <div key={entry.channel} className="drone-sim__radio-channel-item">
+                            <span>{entry.channel}</span>
+                            <span>{entry.function}</span>
+                            <span>{entry.range}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="drone-sim__radio-channel-card">
+                      <div className="drone-sim__radio-info-title">Saved Endpoints</div>
+                      <div className="drone-sim__radio-channel-list">
+                        {(['roll', 'pitch', 'yaw', 'throttle'] as AxisKey[]).map((axis) => (
+                          <div key={axis} className="drone-sim__radio-channel-item">
+                            <span>{axis.toUpperCase()}</span>
+                            <span>{`min ${rcCalibrationData[axis].min} / ctr ${rcCalibrationData[axis].center}`}</span>
+                            <span>{`max ${rcCalibrationData[axis].max}`}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <button type="button" className="drone-sim__radio-calibrate-main" onClick={handleRcCalibrationAction}>
+                      {rcCalibrationRunning ? 'Finish Calibration' : 'Calibrate Radio'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="drone-sim__qgc-header">
+                  <div className="drone-sim__qgc-title">Joystick Setup</div>
+                  <button type="button" className="drone-sim__modal-close" onClick={() => setCalibrationPanel('none')}>
+                    ×
+                  </button>
+                </div>
+                <div className="drone-sim__joystick-tabs">
+                  <button type="button">General</button>
+                  <button type="button">Button Assignment</button>
+                  <button type="button" className="active">Calibration</button>
+                  <button type="button">Advanced</button>
+                </div>
+                <div className="drone-sim__joystick-layout">
+                  <div className="drone-sim__joystick-stage">
+                    <div className="drone-sim__joystick-pad">
+                      <div className="drone-sim__stick-circle">
+                        <span className="drone-sim__stick-dot is-center is-green" />
+                      </div>
+                      <div className="drone-sim__stick-circle">
+                        <span className="drone-sim__stick-dot is-center is-green" />
+                      </div>
+                    </div>
+                    <div className="drone-sim__qgc-actions">
+                      <button type="button" className="drone-sim__qgc-btn drone-sim__qgc-btn--muted">Skip</button>
+                      <button type="button" className="drone-sim__qgc-btn drone-sim__qgc-btn--muted" onClick={() => setCalibrationPanel('none')}>Cancel</button>
+                      <button type="button" className="drone-sim__qgc-btn drone-sim__qgc-btn--primary">Start</button>
+                    </div>
+                  </div>
+                  <div className="drone-sim__joystick-monitor">
+                    {joystickMonitorValues.map((value, index) => (
+                      <div key={index} className="drone-sim__channel-row">
+                        <span>{index}</span>
+                        <div className="drone-sim__channel-track">
+                          <div className="drone-sim__channel-center" />
+                          <div className="drone-sim__channel-thumb" style={{ left: `${value}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

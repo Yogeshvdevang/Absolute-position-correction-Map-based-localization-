@@ -92,6 +92,32 @@ class APCConfig(BaseModel):
   max_queue: int = Field(4, description="Max queued frames")
 
 
+class RCConfig(BaseModel):
+  profile_id: str = "flysky-fsi6"
+  stick_mode: int = 2
+  reversed: Dict[str, bool] = Field(default_factory=lambda: {
+    "roll": False,
+    "pitch": False,
+    "yaw": False,
+    "throttle": False,
+  })
+  calibration: Dict[str, Dict[str, int]] = Field(default_factory=lambda: {
+    "roll": {"min": 1000, "center": 1500, "max": 2000},
+    "pitch": {"min": 1000, "center": 1500, "max": 2000},
+    "yaw": {"min": 1000, "center": 1500, "max": 2000},
+    "throttle": {"min": 1000, "center": 1000, "max": 2000},
+  })
+
+
+class RCStatus(BaseModel):
+  connected: bool = False
+  gamepad_id: Optional[str] = None
+  axes: Dict[str, float] = Field(default_factory=dict)
+  pwm: Dict[str, int] = Field(default_factory=dict)
+  buttons: Dict[str, float] = Field(default_factory=dict)
+  updated_at: Optional[str] = None
+
+
 app = FastAPI(title="C2 API", version="0.1.0")
 app.add_middleware(
   CORSMiddleware,
@@ -147,6 +173,8 @@ apc_train_config: Dict[str, Any] = {
   "lr": 1e-4,
   "augmentations": "medium"
 }
+rc_config = RCConfig()
+rc_status = RCStatus()
 
 # Offline tiles cache
 TILE_CACHE_DIR = Path(os.getenv("TILE_CACHE_DIR", _runtime_root / "tile-cache"))
@@ -697,6 +725,31 @@ async def apc_train_stop():
   apc_train_status["stage"] = "idle"
   apc_train_status["progress"] = 0
   return {"status": "stopped"}
+
+
+@app.get("/rc/config")
+async def rc_config_get():
+  return rc_config
+
+
+@app.post("/rc/config")
+async def rc_config_set(payload: RCConfig):
+  global rc_config
+  rc_config = payload
+  return rc_config
+
+
+@app.get("/rc/status")
+async def rc_status_get():
+  return rc_status
+
+
+@app.post("/rc/status")
+async def rc_status_set(payload: RCStatus):
+  global rc_status
+  rc_status = payload
+  rc_status.updated_at = datetime.now(timezone.utc).isoformat()
+  return {"status": "ok", "updated_at": rc_status.updated_at}
 
 
 @app.get("/tiles/status")
