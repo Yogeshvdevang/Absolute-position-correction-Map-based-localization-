@@ -9,7 +9,7 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "dev:backend": "powershell -ExecutionPolicy Bypass -NoProfile -Command \"if (Test-Path 'app/backend/.venv/Scripts/python.exe') { & 'app/backend/.venv/Scripts/python.exe' -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000 } else { python -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000 }\"",
+    "dev:backend": "powershell -ExecutionPolicy Bypass -NoProfile -Command \"function Test-Uvicorn([string]$py) { if (-not (Test-Path $py)) { return $false }; & $py -m pip show uvicorn *> $null; return $LASTEXITCODE -eq 0 }; $repoPy = 'app/backend/.venv/Scripts/python.exe'; $fallbackPy = 'C:/venvs/apc-gcs/Scripts/python.exe'; if (Test-Uvicorn $repoPy) { & $repoPy -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000 } elseif (Test-Uvicorn $fallbackPy) { & $fallbackPy -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000 } else { python -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000 }\"",
     "dev:all": "concurrently -k -n frontend,backend -c cyan,green \"npm run dev\" \"npm run dev:backend\""
   },
   "dependencies": {

@@ -7,15 +7,23 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $repoRoot
 
 $backendDir = Join-Path $repoRoot "app/backend"
-$venvPy = Join-Path $backendDir ".venv/Scripts/python.exe"
+$repoVenvPy = Join-Path $backendDir ".venv/Scripts/python.exe"
+$fallbackVenvPy = "C:\venvs\apc-gcs\Scripts\python.exe"
+$venvDir = Split-Path -Parent (Split-Path -Parent $fallbackVenvPy)
 
 if (-not (Test-Path $backendDir)) {
   Write-Error "Backend folder not found: $backendDir"
 }
 
-if (-not (Test-Path $venvPy)) {
-  Write-Host "Creating backend venv..." -ForegroundColor Yellow
-  python -m venv $venvPy.Replace("\Scripts\python.exe","")
+if (-not (Test-Path $repoVenvPy) -and -not (Test-Path $fallbackVenvPy)) {
+  Write-Host "Creating backend venv at $venvDir..." -ForegroundColor Yellow
+  python -m venv $venvDir
+}
+
+$venvPy = if ((Test-Path $repoVenvPy) -and (& $repoVenvPy -m pip show uvicorn *> $null; $LASTEXITCODE -eq 0)) {
+  $repoVenvPy
+} else {
+  $fallbackVenvPy
 }
 
 Write-Host "Installing backend dependencies..." -ForegroundColor Yellow

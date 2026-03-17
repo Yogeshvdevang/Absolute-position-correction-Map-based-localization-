@@ -22,21 +22,67 @@ GNSS-denied visual navigation using live imagery aligned to satellite maps for d
 - `src/` frontend React UI
 - `app/backend/` FastAPI backend
 
-## Run (Frontend)
+## Setup
 
-```bash
+Windows note: if backend dependency installation fails in `app/backend/.venv` because the repo path is too long, use a short virtual environment path such as `C:\venvs\apc-gcs`.
+
+### Frontend setup
+
+```powershell
 npm install
+```
+
+### Backend setup
+
+```powershell
+python -m venv C:\venvs\apc-gcs
+C:\venvs\apc-gcs\Scripts\python.exe -m pip install --upgrade pip
+C:\venvs\apc-gcs\Scripts\python.exe -m pip install -r app\backend\requirements.txt
+```
+
+## Run
+
+### Run frontend and backend together
+
+From the repo root:
+
+```powershell
+npm run dev:all
+```
+
+This starts:
+
+- frontend on `http://localhost:8080`
+- backend on `http://localhost:9000`
+
+### Run frontend only
+
+```powershell
 npm run dev
 ```
 
-## Run (Backend)
+### Run backend only
 
-```bash
-cd app/backend
-python api.py
+```powershell
+C:\venvs\apc-gcs\Scripts\python.exe -m uvicorn app.backend.api:app --host 0.0.0.0 --port 9000
 ```
 
 Default backend port is `9000`.
+
+### If port 9000 is already in use
+
+Stop the old backend process, then start again:
+
+```powershell
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 9000).OwningProcess -Force
+npm run dev:all
+```
+
+### Health check
+
+```powershell
+Invoke-WebRequest http://localhost:9000/health
+```
 
 ## Environment
 
