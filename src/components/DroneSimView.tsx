@@ -37,9 +37,34 @@ type SimState = {
   groundPlane: THREE.Mesh | null;
 };
 
+type MissionPreset = {
+  id: 'dsu-city' | 'dsu-main';
+  label: string;
+  lat: number;
+  lon: number;
+  radiusM: number;
+};
+
 const INSET = { width: 240, height: 160, margin: 16 };
 const MAP_TILE = { tileSize: 256, grid: 3 };
-const MAP_DEFAULT: [number, number] = [77.2090, 28.6139];
+const MISSION_PRESETS: MissionPreset[] = [
+  {
+    id: 'dsu-city',
+    label: 'DSU City Campus',
+    lat: 12.8874283,
+    lon: 77.6419887,
+    radiusM: 180
+  },
+  {
+    id: 'dsu-main',
+    label: 'DSU Main Campus',
+    lat: 12.6606692,
+    lon: 77.4508399,
+    radiusM: 260
+  }
+];
+const DEFAULT_PRESET = MISSION_PRESETS[0];
+const MAP_DEFAULT: [number, number] = [DEFAULT_PRESET.lon, DEFAULT_PRESET.lat];
 const WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 type GroundSource = 'satellite' | 'streets';
 
@@ -50,6 +75,7 @@ export const DroneSimView = () => {
   const [mapZoomMin, setMapZoomMin] = useState(14);
   const [mapZoomMax, setMapZoomMax] = useState(18);
   const [mapStatus, setMapStatus] = useState('Map tiles: idle');
+  const [missionPresetId, setMissionPresetId] = useState<MissionPreset['id']>(DEFAULT_PRESET.id);
   const [telemetryWsStatus, setTelemetryWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [cameraWsStatus, setCameraWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [telemetryWsLast, setTelemetryWsLast] = useState('No messages yet.');
@@ -84,6 +110,7 @@ export const DroneSimView = () => {
   const labelEndRef = useRef<HTMLDivElement>(null);
   const labelStartTextRef = useRef<HTMLDivElement>(null);
   const labelEndTextRef = useRef<HTMLDivElement>(null);
+  const presetRef = useRef<HTMLSelectElement>(null);
 
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -244,43 +271,55 @@ export const DroneSimView = () => {
     controls.update();
   };
 
+  const randomOffsetPoint = (preset: MissionPreset) => {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.sqrt(Math.random()) * preset.radiusM;
+    const northMeters = Math.cos(angle) * radius;
+    const eastMeters = Math.sin(angle) * radius;
+    const lat = preset.lat + (northMeters / 111320);
+    const lon = preset.lon + (eastMeters / (111320 * Math.cos((preset.lat * Math.PI) / 180)));
+    return { lat, lon };
+  };
+
   const autoFill = () => {
     const state = stateRef.current;
-    const baseLat = 37.7940;
-    const baseLon = -122.3960;
+    const presetId = presetRef.current?.value as MissionPreset['id'] | undefined;
+    const preset = MISSION_PRESETS.find((entry) => entry.id === presetId) ?? DEFAULT_PRESET;
+    const start = randomOffsetPoint(preset);
+    const target = randomOffsetPoint(preset);
+    const startAlt = 20;
+    const endAlt = 50;
+    const speed = 10;
 
-    if (startLatRef.current) startLatRef.current.value = baseLat.toFixed(6);
-    if (startLonRef.current) startLonRef.current.value = baseLon.toFixed(6);
-    if (startAltRef.current) startAltRef.current.value = '10';
-
-    const tLat = baseLat + 0.002;
-    const tLon = baseLon + 0.002;
-    if (endLatRef.current) endLatRef.current.value = tLat.toFixed(6);
-    if (endLonRef.current) endLonRef.current.value = tLon.toFixed(6);
-    if (endAltRef.current) endAltRef.current.value = '40';
-    if (speedRef.current) speedRef.current.value = '10';
+    if (startLatRef.current) startLatRef.current.value = start.lat.toFixed(6);
+    if (startLonRef.current) startLonRef.current.value = start.lon.toFixed(6);
+    if (startAltRef.current) startAltRef.current.value = String(startAlt);
+    if (endLatRef.current) endLatRef.current.value = target.lat.toFixed(6);
+    if (endLonRef.current) endLonRef.current.value = target.lon.toFixed(6);
+    if (endAltRef.current) endAltRef.current.value = String(endAlt);
+    if (speedRef.current) speedRef.current.value = String(speed);
 
     if (statusRef.current) {
-      statusRef.current.textContent = 'Values Generated!';
+      statusRef.current.textContent = `${preset.label} mission ready`;
       statusRef.current.style.color = '#4ade80';
     }
 
-    state.refLat = baseLat;
-    state.refLon = baseLon;
-    state.refAlt = 10;
-    loadGroundMap(baseLat, baseLon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
+    state.refLat = start.lat;
+    state.refLon = start.lon;
+    state.refAlt = startAlt;
+    loadGroundMap(start.lat, start.lon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
 
     const R = 6371000;
-    const dLat = (tLat - baseLat) * Math.PI / 180;
-    const dLon = (tLon - baseLon) * Math.PI / 180;
-    const latRad = baseLat * Math.PI / 180;
+    const dLat = (target.lat - start.lat) * Math.PI / 180;
+    const dLon = (target.lon - start.lon) * Math.PI / 180;
+    const latRad = start.lat * Math.PI / 180;
     const dN = dLat * R;
     const dE = dLon * Math.cos(latRad) * R;
 
-    state.startPos.set(0, 10, 0);
-    state.endPos.set(dE, 40, -dN);
+    state.startPos.set(0, startAlt, 0);
+    state.endPos.set(dE, endAlt, -dN);
 
-    updateLabelText(baseLat, baseLon, 10, tLat, tLon, 40);
+    updateLabelText(start.lat, start.lon, startAlt, target.lat, target.lon, endAlt);
     viewHome();
   };
 
@@ -546,6 +585,16 @@ export const DroneSimView = () => {
     });
   }, []);
 
+  const applyMissionPreset = useCallback((presetId: MissionPreset['id']) => {
+    const preset = MISSION_PRESETS.find((entry) => entry.id === presetId) ?? DEFAULT_PRESET;
+    if (startLatRef.current) startLatRef.current.value = preset.lat.toFixed(6);
+    if (startLonRef.current) startLonRef.current.value = preset.lon.toFixed(6);
+    if (startAltRef.current && !startAltRef.current.value) startAltRef.current.value = '50';
+    stateRef.current.refLat = preset.lat;
+    stateRef.current.refLon = preset.lon;
+    loadGroundMap(preset.lat, preset.lon, mapSourceRef.current, computeZoomForAlt(stateRef.current.refAlt));
+  }, [loadGroundMap]);
+
   const launchMission = () => {
     const state = stateRef.current;
     const startLat = getNumber(startLatRef, NaN);
@@ -627,6 +676,10 @@ export const DroneSimView = () => {
       manualBtnRef.current.classList.remove('active');
     }
   };
+
+  useEffect(() => {
+    applyMissionPreset(DEFAULT_PRESET.id);
+  }, [applyMissionPreset]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -1045,9 +1098,15 @@ export const DroneSimView = () => {
         bottomCamera.updateProjectionMatrix();
         renderer.clearDepth();
         if (bottomHelperRef.current) bottomHelperRef.current.visible = false;
+        const pathLineWasVisible = state.pathLine?.visible ?? false;
+        const trailLineWasVisible = state.trailLine?.visible ?? false;
+        if (state.pathLine) state.pathLine.visible = false;
+        if (state.trailLine) state.trailLine.visible = false;
         renderer.setViewport(insetX, insetY, insetWidth, insetHeight);
         renderer.setScissor(insetX, insetY, insetWidth, insetHeight);
         renderer.render(scene, bottomCamera);
+        if (state.pathLine) state.pathLine.visible = pathLineWasVisible;
+        if (state.trailLine) state.trailLine.visible = trailLineWasVisible;
         if (bottomHelperRef.current) bottomHelperRef.current.visible = true;
       }
 
@@ -1153,6 +1212,23 @@ export const DroneSimView = () => {
           <div className="sec-title">
             2. Mission Parameters
             <span ref={statusRef} style={{ color: 'var(--accent)' }}>Waiting...</span>
+          </div>
+
+          <div className="input-group">
+            <label>Location Preset</label>
+            <select
+              ref={presetRef}
+              value={missionPresetId}
+              onChange={(e) => {
+                const nextPresetId = e.target.value as MissionPreset['id'];
+                setMissionPresetId(nextPresetId);
+                applyMissionPreset(nextPresetId);
+              }}
+            >
+              {MISSION_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>{preset.label}</option>
+              ))}
+            </select>
           </div>
 
           <div className="input-group">
