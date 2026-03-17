@@ -123,6 +123,29 @@
   text-align: right;
 }
 
+.drone-sim__camera-toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.drone-sim__camera-toggle {
+  background: #162235;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  padding: 9px 8px;
+  text-align: left;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.drone-sim__camera-toggle.active {
+  background: #0ea5e9;
+  color: #f8fafc;
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.28);
+}
+
 .drone-sim .btn-container {
   display: grid;
   grid-template-columns: 1fr 1fr;

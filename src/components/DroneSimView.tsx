@@ -50,8 +50,11 @@ type RcProfileId = 'flysky-fsi6' | 'radiomaster-pocket';
 type CalibrationPanel = 'none' | 'rc' | 'joystick';
 type AxisKey = 'roll' | 'pitch' | 'yaw' | 'throttle';
 type AxisCalibration = { min: number; center: number; max: number };
+type CameraViewKey = 'bottom' | 'bottomClean' | 'front' | 'left' | 'right';
 
 const INSET = { width: 240, height: 160, margin: 16 };
+const CAMERA_STREAM_TARGET_FPS = 120;
+const CAMERA_STREAM_INTERVAL_MS = 1000 / CAMERA_STREAM_TARGET_FPS;
 const MAP_TILE = { tileSize: 256, grid: 3 };
 const MISSION_PRESETS: MissionPreset[] = [
   {
@@ -74,6 +77,20 @@ const MAP_DEFAULT: [number, number] = [DEFAULT_PRESET.lon, DEFAULT_PRESET.lat];
 const WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 const API_BASE = import.meta.env.VITE_BACKEND_BASE || WS_BASE.replace(/^ws/i, 'http');
 type GroundSource = 'satellite' | 'streets';
+const CAMERA_VIEW_LABELS: Record<CameraViewKey, string> = {
+  bottom: 'Bottom Camera + Trace',
+  bottomClean: 'Bottom Camera Clean',
+  front: 'Front Camera',
+  left: 'Left Camera',
+  right: 'Right Camera',
+};
+const CAMERA_VIEW_TITLES: Record<CameraViewKey, string> = {
+  bottom: 'Bottom Facing Drone Cam + Trace',
+  bottomClean: 'Bottom Facing Drone Cam Clean',
+  front: 'Front Facing Drone Cam',
+  left: 'Left Facing Drone Cam',
+  right: 'Right Facing Drone Cam',
+};
 const RC_PROFILES: Array<{
   id: RcProfileId;
   label: string;
@@ -113,7 +130,14 @@ const RC_PROFILES: Array<{
 
 export const DroneSimView = () => {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const [bottomFov, setBottomFov] = useState(60);
+  const [bottomFov, setBottomFov] = useState(120);
+  const [cameraViews, setCameraViews] = useState<Record<CameraViewKey, boolean>>({
+    bottom: true,
+    bottomClean: true,
+    front: false,
+    left: false,
+    right: false,
+  });
   const [mapSource, setMapSource] = useState<GroundSource>('satellite');
   const [mapZoomMin, setMapZoomMin] = useState(14);
   const [mapZoomMax, setMapZoomMax] = useState(18);
@@ -150,6 +174,7 @@ export const DroneSimView = () => {
   });
   const [telemetryWsStatus, setTelemetryWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [cameraWsStatus, setCameraWsStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const [cameraStreamFps, setCameraStreamFps] = useState(0);
   const [telemetryWsLast, setTelemetryWsLast] = useState('No messages yet.');
   const mapSourceRef = useRef<GroundSource>('satellite');
   const mapZoomMinRef = useRef(14);
@@ -185,9 +210,22 @@ export const DroneSimView = () => {
   const presetRef = useRef<HTMLSelectElement>(null);
 
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const streamRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const bottomCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const bottomHelperRef = useRef<THREE.CameraHelper | null>(null);
+  const droneCameraRefs = useRef<Record<CameraViewKey, THREE.PerspectiveCamera | null>>({
+    bottom: null,
+    bottomClean: null,
+    front: null,
+    left: null,
+    right: null,
+  });
+  const cameraViewStateRef = useRef<Record<CameraViewKey, boolean>>({
+    bottom: true,
+    bottomClean: true,
+    front: false,
+    left: false,
+    right: false,
+  });
   const sceneRef = useRef<THREE.Scene | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const animRef = useRef<number | null>(null);
@@ -197,6 +235,12 @@ export const DroneSimView = () => {
     yaw: 0,
     throttle: -1,
   });
+  const rcPwmRef = useRef<Record<AxisKey, number>>({
+    roll: 1500,
+    pitch: 1500,
+    yaw: 1500,
+    throttle: 1000,
+  });
   const manualInputModeRef = useRef<ManualInputMode>('keyboard');
   const gamepadConnectedRef = useRef(false);
   const axisReverseRef = useRef<Record<AxisKey, boolean>>({
@@ -205,7 +249,16 @@ export const DroneSimView = () => {
     yaw: false,
     throttle: false,
   });
+  const rcCalibrationDataRef = useRef<Record<AxisKey, AxisCalibration>>({
+    roll: { min: 1000, center: 1500, max: 2000 },
+    pitch: { min: 1000, center: 1500, max: 2000 },
+    yaw: { min: 1000, center: 1500, max: 2000 },
+    throttle: { min: 1000, center: 1000, max: 2000 },
+  });
   const rcStatusPushRef = useRef(0);
+  const cameraStreamLastSentRef = useRef(0);
+  const cameraStreamFrameCountRef = useRef(0);
+  const cameraStreamWindowStartRef = useRef(0);
   const rcCalibrationCaptureRef = useRef<Record<AxisKey, AxisCalibration>>({
     roll: { min: 1000, center: 1500, max: 2000 },
     pitch: { min: 1000, center: 1500, max: 2000 },
@@ -266,17 +319,24 @@ export const DroneSimView = () => {
   const connectCameraWs = () => {
     if (cameraWsRef.current) cameraWsRef.current.close();
     setCameraWsStatus('connecting');
+    setCameraStreamFps(0);
+    cameraStreamFrameCountRef.current = 0;
+    cameraStreamWindowStartRef.current = performance.now();
     const ws = new WebSocket(cameraWsUrl);
     cameraWsRef.current = ws;
     ws.onopen = () => setCameraWsStatus('connected');
     ws.onerror = () => setCameraWsStatus('error');
-    ws.onclose = () => setCameraWsStatus('disconnected');
+    ws.onclose = () => {
+      setCameraWsStatus('disconnected');
+      setCameraStreamFps(0);
+    };
   };
 
   const disconnectCameraWs = () => {
     cameraWsRef.current?.close();
     cameraWsRef.current = null;
     setCameraWsStatus('disconnected');
+    setCameraStreamFps(0);
   };
 
   const stateRef = useRef<SimState>({
@@ -486,13 +546,18 @@ export const DroneSimView = () => {
   const handleBottomFovChange = (value: number) => {
     const next = Math.max(20, Math.min(140, value));
     setBottomFov(next);
-    const camera = bottomCameraRef.current;
-    if (camera) {
+    Object.values(droneCameraRefs.current).forEach((camera) => {
+      if (!camera) return;
       camera.fov = next;
       camera.updateProjectionMatrix();
-      bottomHelperRef.current?.update();
-    }
+    });
   };
+
+  const toggleCameraView = (view: CameraViewKey) => {
+    setCameraViews((prev) => ({ ...prev, [view]: !prev[view] }));
+  };
+
+  const activeCameraViewKeys = (Object.keys(cameraViews) as CameraViewKey[]).filter((key) => cameraViews[key]);
 
   const handleManualInputModeChange = (mode: ManualInputMode) => {
     setManualInputMode(mode);
@@ -857,8 +922,20 @@ export const DroneSimView = () => {
   }, [gamepadConnected]);
 
   useEffect(() => {
+    cameraViewStateRef.current = cameraViews;
+  }, [cameraViews]);
+
+  useEffect(() => {
     axisReverseRef.current = axisReverse;
   }, [axisReverse]);
+
+  useEffect(() => {
+    rcPwmRef.current = rcPwm;
+  }, [rcPwm]);
+
+  useEffect(() => {
+    rcCalibrationDataRef.current = rcCalibrationData;
+  }, [rcCalibrationData]);
 
   const activeRcProfile = RC_PROFILES.find((profile) => profile.id === rcProfileId) ?? RC_PROFILES[0];
   const rcMonitorValues = rcAuxPwm.map((value) => Math.max(0, Math.min(100, ((value - 1000) / 1000) * 100)));
@@ -1023,6 +1100,10 @@ export const DroneSimView = () => {
     renderer.shadowMap.enabled = true;
     viewport.appendChild(renderer.domElement);
 
+    const streamRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    streamRenderer.setSize(INSET.width, INSET.height);
+    streamRenderer.shadowMap.enabled = true;
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
@@ -1126,8 +1207,25 @@ export const DroneSimView = () => {
     bottomCamera.rotation.x = -Math.PI / 2;
     state.droneGroup.add(bottomCamera);
 
-    const bottomHelper = new THREE.CameraHelper(bottomCamera);
-    scene.add(bottomHelper);
+    const bottomCleanCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    bottomCleanCamera.position.copy(bottomCamera.position);
+    bottomCleanCamera.rotation.copy(bottomCamera.rotation);
+    state.droneGroup.add(bottomCleanCamera);
+
+    const frontCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    frontCamera.position.set(0, 0.15, 0.7);
+    frontCamera.rotation.x = -0.08;
+    state.droneGroup.add(frontCamera);
+
+    const leftCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    leftCamera.position.set(-0.7, 0.1, 0);
+    leftCamera.rotation.y = -Math.PI / 2;
+    state.droneGroup.add(leftCamera);
+
+    const rightCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    rightCamera.position.set(0.7, 0.1, 0);
+    rightCamera.rotation.y = Math.PI / 2;
+    state.droneGroup.add(rightCamera);
 
     const lineMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 1, opacity: 0.5, transparent: true });
     const lineGeo = new THREE.BufferGeometry();
@@ -1250,17 +1348,27 @@ export const DroneSimView = () => {
         let strafe = (input.right ? 1 : 0) - (input.left ? 1 : 0);
         let vertical = (input.up ? 1 : 0) - (input.down ? 1 : 0);
         if ((manualInputModeRef.current === 'joystick' || manualInputModeRef.current === 'rc') && gamepadConnectedRef.current) {
-          const axes = gamepadAxesRef.current;
-          const reversedAxes = {
-            roll: axisReverseRef.current.roll ? -axes.roll : axes.roll,
-            pitch: axisReverseRef.current.pitch ? -axes.pitch : axes.pitch,
-            yaw: axisReverseRef.current.yaw ? -axes.yaw : axes.yaw,
-            throttle: axisReverseRef.current.throttle ? -axes.throttle : axes.throttle,
+          const normalizePwm = (axis: AxisKey) => {
+            const pwm = rcPwmRef.current[axis];
+            const calibration = rcCalibrationDataRef.current[axis];
+            const midpoint = axis === 'throttle'
+              ? (calibration.min + calibration.max) * 0.5
+              : calibration.center;
+            if (pwm >= midpoint) {
+              return Math.min(1, (pwm - midpoint) / Math.max(1, calibration.max - midpoint));
+            }
+            return -Math.min(1, (midpoint - pwm) / Math.max(1, midpoint - calibration.min));
           };
-          strafe = Math.abs(reversedAxes.roll) > 0.08 ? reversedAxes.roll : 0;
-          forward = Math.abs(reversedAxes.pitch) > 0.08 ? -reversedAxes.pitch : 0;
-          vertical = Math.abs(reversedAxes.throttle) > 0.08 ? -reversedAxes.throttle : 0;
-          if (Math.abs(reversedAxes.yaw) > 0.08) state.manualYaw += reversedAxes.yaw * yawRate * dt;
+
+          const rollInput = normalizePwm('roll');
+          const pitchInput = normalizePwm('pitch');
+          const throttleInput = normalizePwm('throttle');
+          const yawInput = normalizePwm('yaw');
+
+          strafe = Math.abs(rollInput) > 0.08 ? rollInput : 0;
+          forward = Math.abs(pitchInput) > 0.08 ? -pitchInput : 0;
+          vertical = Math.abs(throttleInput) > 0.08 ? -throttleInput : 0;
+          if (Math.abs(yawInput) > 0.08) state.manualYaw += yawInput * yawRate * dt;
         }
 
         const prevPos = state.currentPos.clone();
@@ -1316,8 +1424,6 @@ export const DroneSimView = () => {
         if (state.axisGroup) {
           state.axisGroup.position.copy(state.currentPos);
         }
-        bottomHelperRef.current?.update();
-
         const dE = state.currentPos.x;
         const dN = -state.currentPos.z;
         const R = 6378137;
@@ -1396,8 +1502,6 @@ export const DroneSimView = () => {
       if (state.axisGroup) {
         state.axisGroup.position.copy(state.currentPos);
       }
-      bottomHelperRef.current?.update();
-
       const dE = state.currentPos.x;
       const dN = -state.currentPos.z;
       const R = 6378137;
@@ -1419,31 +1523,78 @@ export const DroneSimView = () => {
       const viewportHeight = viewport.clientHeight || 1;
 
       renderer.setScissorTest(true);
-      if (bottomHelperRef.current) bottomHelperRef.current.visible = true;
       renderer.setViewport(0, 0, viewportWidth, viewportHeight);
       renderer.setScissor(0, 0, viewportWidth, viewportHeight);
       renderer.render(scene, camera);
 
-      const insetWidth = Math.min(INSET.width, viewportWidth - INSET.margin * 2);
-      const insetHeight = Math.min(INSET.height, viewportHeight - INSET.margin * 2);
-      const insetX = Math.max(INSET.margin, viewportWidth - insetWidth - INSET.margin);
-      const insetY = INSET.margin;
-      const bottomCamera = bottomCameraRef.current;
-      if (bottomCamera && insetWidth > 0 && insetHeight > 0) {
-        bottomCamera.aspect = insetWidth / insetHeight;
-        bottomCamera.updateProjectionMatrix();
+      const activeViews = (Object.keys(cameraViewStateRef.current) as CameraViewKey[]).filter((key) => cameraViewStateRef.current[key]);
+      const columns = activeViews.length > 1 ? 2 : 1;
+      const rows = Math.ceil(activeViews.length / columns);
+      const insetWidth = Math.min(INSET.width, Math.floor((viewportWidth - INSET.margin * (columns + 1)) / columns));
+      const insetHeight = Math.min(INSET.height, Math.floor((viewportHeight - INSET.margin * (rows + 1)) / Math.max(1, rows)));
+      activeViews.forEach((view, index) => {
+        const cam = droneCameraRefs.current[view];
+        if (!cam || insetWidth <= 0 || insetHeight <= 0) return;
+        const col = index % columns;
+        const row = Math.floor(index / columns);
+        const insetX = Math.max(INSET.margin, viewportWidth - ((columns - col) * insetWidth) - ((columns - col) * INSET.margin));
+        const insetY = INSET.margin + ((rows - row - 1) * (insetHeight + INSET.margin));
+        cam.aspect = insetWidth / insetHeight;
+        cam.updateProjectionMatrix();
         renderer.clearDepth();
-        if (bottomHelperRef.current) bottomHelperRef.current.visible = false;
-        const pathLineWasVisible = state.pathLine?.visible ?? false;
-        const trailLineWasVisible = state.trailLine?.visible ?? false;
-        if (state.pathLine) state.pathLine.visible = false;
-        if (state.trailLine) state.trailLine.visible = false;
         renderer.setViewport(insetX, insetY, insetWidth, insetHeight);
         renderer.setScissor(insetX, insetY, insetWidth, insetHeight);
-        renderer.render(scene, bottomCamera);
-        if (state.pathLine) state.pathLine.visible = pathLineWasVisible;
-        if (state.trailLine) state.trailLine.visible = trailLineWasVisible;
-        if (bottomHelperRef.current) bottomHelperRef.current.visible = true;
+        const hideTrace = view === 'bottomClean';
+        const prevPathVisible = state.pathLine?.visible ?? true;
+        const prevTrailVisible = state.trailLine?.visible ?? true;
+        if (hideTrace) {
+          if (state.pathLine) state.pathLine.visible = false;
+          if (state.trailLine) state.trailLine.visible = false;
+        }
+        renderer.render(scene, cam);
+        if (hideTrace) {
+          if (state.pathLine) state.pathLine.visible = prevPathVisible;
+          if (state.trailLine) state.trailLine.visible = prevTrailVisible;
+        }
+      });
+
+      const cameraSocket = cameraWsRef.current;
+      const cleanCamera = droneCameraRefs.current.bottomClean;
+      if (
+        cameraSocket &&
+        cameraSocket.readyState === WebSocket.OPEN &&
+        cleanCamera &&
+        performance.now() - cameraStreamLastSentRef.current >= CAMERA_STREAM_INTERVAL_MS
+      ) {
+        const prevPathVisible = state.pathLine?.visible ?? true;
+        const prevTrailVisible = state.trailLine?.visible ?? true;
+        if (state.pathLine) state.pathLine.visible = false;
+        if (state.trailLine) state.trailLine.visible = false;
+        cleanCamera.aspect = INSET.width / INSET.height;
+        cleanCamera.updateProjectionMatrix();
+        streamRenderer.setViewport(0, 0, INSET.width, INSET.height);
+        streamRenderer.setScissorTest(false);
+        streamRenderer.render(scene, cleanCamera);
+        if (state.pathLine) state.pathLine.visible = prevPathVisible;
+        if (state.trailLine) state.trailLine.visible = prevTrailVisible;
+        try {
+          const jpgBase64 = streamRenderer.domElement.toDataURL('image/jpeg', 0.72).split(',')[1];
+          cameraSocket.send(jpgBase64);
+          const sentAt = performance.now();
+          cameraStreamLastSentRef.current = sentAt;
+          if (cameraStreamWindowStartRef.current === 0) {
+            cameraStreamWindowStartRef.current = sentAt;
+          }
+          cameraStreamFrameCountRef.current += 1;
+          const fpsWindowMs = sentAt - cameraStreamWindowStartRef.current;
+          if (fpsWindowMs >= 500) {
+            setCameraStreamFps((cameraStreamFrameCountRef.current * 1000) / fpsWindowMs);
+            cameraStreamFrameCountRef.current = 0;
+            cameraStreamWindowStartRef.current = sentAt;
+          }
+        } catch {
+          setCameraWsStatus('error');
+        }
       }
 
       renderer.setScissorTest(false);
@@ -1501,9 +1652,15 @@ export const DroneSimView = () => {
     animate();
 
     rendererRef.current = renderer;
+    streamRendererRef.current = streamRenderer;
     cameraRef.current = camera;
-    bottomCameraRef.current = bottomCamera;
-    bottomHelperRef.current = bottomHelper;
+    droneCameraRefs.current = {
+      bottom: bottomCamera,
+      bottomClean: bottomCleanCamera,
+      front: frontCamera,
+      left: leftCamera,
+      right: rightCamera,
+    };
     sceneRef.current = scene;
     controlsRef.current = controls;
 
@@ -1516,6 +1673,7 @@ export const DroneSimView = () => {
       cameraWsRef.current?.close();
       controls.dispose();
       renderer.dispose();
+      streamRenderer.dispose();
       scene.clear();
       if (viewport.contains(renderer.domElement)) {
         viewport.removeChild(renderer.domElement);
@@ -1669,6 +1827,24 @@ export const DroneSimView = () => {
               <div className="drone-sim__range-value">{bottomFov} deg</div>
             </div>
           </div>
+          <div className="input-group">
+            <label>In-Sim Camera Views</label>
+            <div className="drone-sim__camera-toggle-grid">
+              {(Object.keys(CAMERA_VIEW_TITLES) as CameraViewKey[]).map((view) => (
+                <button
+                  key={view}
+                  type="button"
+                  className={`drone-sim__camera-toggle${cameraViews[view] ? ' active' : ''}`}
+                  onClick={() => toggleCameraView(view)}
+                >
+                  {CAMERA_VIEW_TITLES[view]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="drone-sim__manual-hint">
+            Turn each view on or off independently. Flight traces remain visible in all enabled camera feeds.
+          </div>
         </div>
 
         <div className="section">
@@ -1750,6 +1926,9 @@ export const DroneSimView = () => {
               </div>
             </div>
             <div className="drone-sim__ws-note">
+              Camera stream FPS: {cameraWsStatus === 'connected' ? cameraStreamFps.toFixed(1) : '0.0'}
+            </div>
+            <div className="drone-sim__ws-note">
               Camera WS expects the client to stream JPEG frames. This tester only opens the socket.
             </div>
           </div>
@@ -1771,12 +1950,26 @@ export const DroneSimView = () => {
           <div ref={distRef}>Dist: 0m</div>
         </div>
 
-        <div
-          className="drone-sim__camera-feed"
-          style={{ width: INSET.width, height: INSET.height, right: INSET.margin, bottom: INSET.margin }}
-        >
-          <div className="drone-sim__camera-label">Bottom Camera</div>
-        </div>
+        {activeCameraViewKeys.map((view, index) => {
+          const columns = activeCameraViewKeys.length > 1 ? 2 : 1;
+          const rows = Math.ceil(activeCameraViewKeys.length / columns);
+          const col = index % columns;
+          const row = Math.floor(index / columns);
+          const width = INSET.width;
+          const height = INSET.height;
+          const right = INSET.margin + ((columns - col - 1) * (width + INSET.margin));
+          const bottom = INSET.margin + ((rows - row - 1) * (height + INSET.margin));
+
+          return (
+            <div
+              key={view}
+              className="drone-sim__camera-feed"
+              style={{ width, height, right, bottom }}
+            >
+              <div className="drone-sim__camera-label">{CAMERA_VIEW_LABELS[view]}</div>
+            </div>
+          );
+        })}
 
 
         <div ref={labelStartRef} className="label-marker">
