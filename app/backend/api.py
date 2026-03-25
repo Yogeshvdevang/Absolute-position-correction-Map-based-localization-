@@ -33,6 +33,7 @@ from .benchmark import BenchmarkRunner
 from .benchmark.interfaces import BenchmarkRequest
 from .vendor_visual_localization.service import VisualLocalizationConfig, VisualLocalizationService
 from .icon_tracker_process import ManagedIconTrackerProcess
+from .icon_tracker_fallback import IconTrackerFallbackService
 
 # Configuration
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://localhost:8000")
@@ -170,7 +171,7 @@ ICON_TRACKER_CAMERA_IP = os.getenv("ICON_TRACKER_CAMERA_IP", "192.168.144.25")
 ICON_TRACKER_CAMERA_PORT = int(os.getenv("ICON_TRACKER_CAMERA_PORT", "37260"))
 ICON_TRACKER_RTSP_URL = os.getenv("ICON_TRACKER_RTSP_URL", f"rtsp://{ICON_TRACKER_CAMERA_IP}:8554/main.264")
 ICON_TRACKER_CAMERA_NAME = os.getenv("ICON_TRACKER_CAMERA_NAME", "A8 Mini")
-ICON_TRACKER_AUTOSTART = os.getenv("ICON_TRACKER_AUTOSTART", "1").strip().lower() in {"1", "true", "yes", "on"}
+ICON_TRACKER_AUTOSTART = os.getenv("ICON_TRACKER_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}
 FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", _runtime_root / "frontend" / "build"))
 if FRONTEND_DIR.exists():
   app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
@@ -236,9 +237,23 @@ icon_tracker_process = ManagedIconTrackerProcess(
   camera_name=ICON_TRACKER_CAMERA_NAME,
   enabled=ICON_TRACKER_AUTOSTART,
 )
+icon_tracker_fallback = IconTrackerFallbackService(
+  tracker_root=ICON_TRACKER_ROOT,
+  camera_ip=ICON_TRACKER_CAMERA_IP,
+  camera_port=ICON_TRACKER_CAMERA_PORT,
+  rtsp_url=ICON_TRACKER_RTSP_URL,
+)
 ICON_TRACKER_STATUS_CACHE_TTL_SECONDS = float(os.getenv("ICON_TRACKER_STATUS_CACHE_TTL_SECONDS", "0.35"))
 icon_tracker_status_cache: Dict[str, Any] = {"ts": 0.0, "payload": None}
 icon_tracker_status_lock = asyncio.Lock()
+
+# Fast-path: track whether the external subprocess tracker is reachable.
+# When it's known to be down, all API calls skip the proxy entirely → instant fallback.
+_external_tracker_state: Dict[str, Any] = {
+  "available": False,
+  "last_check_ts": 0.0,
+  "recheck_interval": 15.0,  # seconds between re-probing a down tracker
+}
 
 # Offline tiles cache
 TILE_CACHE_DIR = Path(os.getenv("TILE_CACHE_DIR", _runtime_root / "tile-cache"))
@@ -595,17 +610,21 @@ async def startup_event():
       apc_raster = None
       apc_preprocessor = None
   asyncio.create_task(_bridge_telemetry_loop())
-  try:
-    if ICON_TRACKER_AUTOSTART:
-      asyncio.create_task(asyncio.to_thread(icon_tracker_process.ensure_running, 2.5))
-  except Exception:
-    pass
+  asyncio.create_task(_tracker_availability_loop())
+  # Disabled external tracker autostart to avoid port/socket conflicts. 
+  # Using the internal IconTrackerFallbackService instead.
+  # if ICON_TRACKER_AUTOSTART:
+  #   asyncio.create_task(asyncio.to_thread(icon_tracker_process.ensure_running, 2.5))
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
   try:
     icon_tracker_process.shutdown()
+  except Exception:
+    pass
+  try:
+    icon_tracker_fallback.shutdown()
   except Exception:
     pass
 
@@ -1021,7 +1040,40 @@ async def benchmark_run(request: BenchmarkRequest):
   return benchmark_runner.run(request)
 
 
-async def _icon_tracker_proxy(path: str, payload: Optional[Dict[str, Any]] = None, timeout_seconds: float = 6.0):
+def _external_tracker_is_up() -> bool:
+  """Return True if the external tracker subprocess is believed to be reachable."""
+  return bool(_external_tracker_state.get("available", False))
+
+
+async def _tracker_availability_loop():
+  """Background task: periodically probe the external tracker subprocess and
+  update `_external_tracker_state` so that API calls can skip the slow proxy
+  path when the tracker is down."""
+  while True:
+    try:
+      async with httpx.AsyncClient(timeout=0.8) as client:
+        resp = await client.get(f"{ICON_TRACKER_BASE}/api/status")
+      up = resp.status_code < 500
+    except Exception:
+      up = False
+    _external_tracker_state["available"] = up
+    _external_tracker_state["last_check_ts"] = asyncio.get_running_loop().time()
+    # If down, also eagerly start the fallback so frames are ready.
+    if not up:
+      icon_tracker_fallback.ensure_started()
+    interval = 10.0 if up else _external_tracker_state.get("recheck_interval", 15.0)
+    await asyncio.sleep(interval)
+
+
+async def _icon_tracker_proxy(path: str, payload: Optional[Dict[str, Any]] = None, timeout_seconds: float = 1.0):
+  # Fast path: if the external tracker is known to be down, return error
+  # immediately so the caller can fall back without waiting.
+  if not _external_tracker_is_up():
+    return JSONResponse(
+      status_code=502,
+      content={"ok": False, "error": "External tracker is offline (fast-path)"},
+    )
+
   url = f"{ICON_TRACKER_BASE}{path}"
   try:
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -1030,33 +1082,15 @@ async def _icon_tracker_proxy(path: str, payload: Optional[Dict[str, Any]] = Non
       else:
         response = await client.post(url, json=payload)
   except Exception as exc:
-    # Attempt to boot the bundled icon_model_tracker service and retry once.
-    started = await asyncio.to_thread(icon_tracker_process.ensure_running, 6.0)
-    if started:
-      try:
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-          if payload is None:
-            response = await client.get(url)
-          else:
-            response = await client.post(url, json=payload)
-      except Exception as retry_exc:
-        return JSONResponse(
-          status_code=502,
-          content={
-            "ok": False,
-            "error": f"Icon tracker is unreachable at {ICON_TRACKER_BASE}",
-            "details": str(retry_exc),
-          },
-        )
-    else:
-      return JSONResponse(
-        status_code=502,
-        content={
-          "ok": False,
-          "error": f"Icon tracker is unreachable at {ICON_TRACKER_BASE}",
-          "details": str(exc),
-        },
-      )
+    _external_tracker_state["available"] = False
+    return JSONResponse(
+      status_code=502,
+      content={
+        "ok": False,
+        "error": f"Icon tracker unreachable at {ICON_TRACKER_BASE}",
+        "details": str(exc),
+      },
+    )
 
   try:
     data = response.json()
@@ -1078,6 +1112,23 @@ def _is_tracker_error_response(result: Any) -> bool:
 def _invalidate_icon_tracker_status_cache() -> None:
   icon_tracker_status_cache["ts"] = 0.0
   icon_tracker_status_cache["payload"] = None
+
+
+async def _fallback_mjpeg_generator():
+  """Yield MJPEG frames from the fallback RTSP capture service."""
+  icon_tracker_fallback.ensure_started()
+  boundary = b"--frame"
+  while True:
+    jpeg = icon_tracker_fallback.latest_jpeg()
+    if jpeg is None:
+      await asyncio.sleep(0.02)
+      continue
+    yield boundary + b"\r\n"
+    yield b"Content-Type: image/jpeg\r\n"
+    yield f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+    yield jpeg
+    yield b"\r\n"
+    await asyncio.sleep(0.033)
 
 
 async def _external_stream_generator(stream_url: str):
@@ -1113,15 +1164,19 @@ async def icon_tracker_status():
       return cached_payload
 
     result = await _icon_tracker_proxy("/api/status", None, timeout_seconds=2.0)
-    if not _is_tracker_error_response(result):
-      icon_tracker_status_cache["payload"] = result
-      icon_tracker_status_cache["ts"] = asyncio.get_running_loop().time()
+    if _is_tracker_error_response(result):
+      # Fallback: serve status from the in-process fallback service
+      result = icon_tracker_fallback.status_payload()
+    icon_tracker_status_cache["payload"] = result
+    icon_tracker_status_cache["ts"] = asyncio.get_running_loop().time()
     return result
 
 
 @app.post("/integrations/icon-tracker/select-target")
 async def icon_tracker_select_target(req: IconTrackerTargetRequest):
   result = await _icon_tracker_proxy("/api/select-target", {"track_id": req.track_id}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.select_target(req.track_id)
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1129,6 +1184,8 @@ async def icon_tracker_select_target(req: IconTrackerTargetRequest):
 @app.post("/integrations/icon-tracker/select-model")
 async def icon_tracker_select_model(req: IconTrackerModelRequest):
   result = await _icon_tracker_proxy("/api/select-model", {"model_path": req.model_path}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.select_model(req.model_path)
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1136,6 +1193,8 @@ async def icon_tracker_select_model(req: IconTrackerModelRequest):
 @app.post("/integrations/icon-tracker/toggle-class")
 async def icon_tracker_toggle_class(req: IconTrackerClassRequest):
   result = await _icon_tracker_proxy("/api/toggle-class", {"class_name": req.class_name}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.toggle_class(req.class_name)
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1143,6 +1202,8 @@ async def icon_tracker_toggle_class(req: IconTrackerClassRequest):
 @app.post("/integrations/icon-tracker/toggle-tracking")
 async def icon_tracker_toggle_tracking():
   result = await _icon_tracker_proxy("/api/toggle-tracking", {}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.toggle_tracking()
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1150,6 +1211,8 @@ async def icon_tracker_toggle_tracking():
 @app.post("/integrations/icon-tracker/stop-tracking")
 async def icon_tracker_stop_tracking():
   result = await _icon_tracker_proxy("/api/stop-tracking", {}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.stop_tracking()
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1157,6 +1220,8 @@ async def icon_tracker_stop_tracking():
 @app.post("/integrations/icon-tracker/center")
 async def icon_tracker_center():
   result = await _icon_tracker_proxy("/api/center", {}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.center()
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1164,6 +1229,8 @@ async def icon_tracker_center():
 @app.post("/integrations/icon-tracker/move")
 async def icon_tracker_move(req: IconTrackerMoveRequest):
   result = await _icon_tracker_proxy("/api/move", {"yaw": req.yaw, "pitch": req.pitch}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.move(req.yaw, req.pitch)
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1171,6 +1238,8 @@ async def icon_tracker_move(req: IconTrackerMoveRequest):
 @app.post("/integrations/icon-tracker/stop-motion")
 async def icon_tracker_stop_motion():
   result = await _icon_tracker_proxy("/api/stop-motion", {}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.stop_motion()
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1178,6 +1247,8 @@ async def icon_tracker_stop_motion():
 @app.post("/integrations/icon-tracker/zoom")
 async def icon_tracker_zoom(req: IconTrackerZoomRequest):
   result = await _icon_tracker_proxy("/api/zoom", {"direction": req.direction}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.zoom(req.direction)
   _invalidate_icon_tracker_status_cache()
   return result
 
@@ -1185,16 +1256,24 @@ async def icon_tracker_zoom(req: IconTrackerZoomRequest):
 @app.post("/integrations/icon-tracker/set-camera-speed")
 async def icon_tracker_set_camera_speed(req: IconTrackerSpeedRequest):
   result = await _icon_tracker_proxy("/api/set-camera-speed", {"speed_scale": req.speed_scale}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.set_camera_speed(req.speed_scale)
   _invalidate_icon_tracker_status_cache()
   return result
 
 
 @app.get("/integrations/icon-tracker/stream.mjpg")
 async def icon_tracker_stream():
-  await asyncio.to_thread(icon_tracker_process.ensure_running, 6.0)
-  stream_url = f"{ICON_TRACKER_BASE}/stream.mjpg"
-  # Use tracker-native MJPEG stream directly to avoid proxy buffering latency.
-  return RedirectResponse(url=stream_url, status_code=307)
+  # If the external tracker is known to be up, redirect instantly.
+  if _external_tracker_is_up():
+    stream_url = f"{ICON_TRACKER_BASE}/stream.mjpg"
+    return RedirectResponse(url=stream_url, status_code=307)
+  # Serve frames from fallback RTSP capture — no waiting for subprocess.
+  icon_tracker_fallback.ensure_started()
+  return StreamingResponse(
+    _fallback_mjpeg_generator(),
+    media_type="multipart/x-mixed-replace; boundary=frame",
+  )
 
 
 @app.get("/integrations/visual-localization")
