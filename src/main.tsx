@@ -1,6 +1,9 @@
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { installTerminalEventBridge } from "./lib/terminal-events";
+
+installTerminalEventBridge();
 
 // Register service worker for map tile caching
 if ('serviceWorker' in navigator) {

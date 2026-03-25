@@ -63,6 +63,9 @@ export const OfflineMapsPanel = ({
   const [budgetEstimate, setBudgetEstimate] = useState<number | null>(null);
   const [budgetBBoxLocal, setBudgetBBoxLocal] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
   const [status, setStatus] = useState<any>(null);
+  const [visualDbStatus, setVisualDbStatus] = useState<any>(null);
+  const [visualDbBusy, setVisualDbBusy] = useState(false);
+  const [visualDbMessage, setVisualDbMessage] = useState<string | null>(null);
   const adjustingRef = useRef(false);
   const apiBase = import.meta.env.VITE_CHAOX_API_BASE || 'http://localhost:9000';
 
@@ -101,6 +104,20 @@ export const OfflineMapsPanel = ({
       }
     }, 1500);
     return () => clearInterval(timer);
+  }, [apiBase]);
+
+  useEffect(() => {
+    const loadVisualDbStatus = async () => {
+      try {
+        const res = await fetch(`${apiBase}/tiles/visual-localization-db`);
+        if (res.ok) {
+          setVisualDbStatus(await res.json());
+        }
+      } catch {
+        // ignore
+      }
+    };
+    void loadVisualDbStatus();
   }, [apiBase]);
 
   const mapTypeList = useMemo(
@@ -262,6 +279,43 @@ export const OfflineMapsPanel = ({
 
   const handleCancel = async () => {
     await fetch(`${apiBase}/tiles/cancel`, { method: 'POST' });
+  };
+
+  const handleBuildVisualDb = async () => {
+    setVisualDbBusy(true);
+    setVisualDbMessage('Preparing visual localization DB from cached satellite tiles...');
+    try {
+      const res = await fetch(`${apiBase}/tiles/visual-localization-db`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          map_type: 'satellite',
+          zoom_level: maxZoom,
+          activate_for_visual_localization: true,
+        })
+      });
+      const rawText = await res.text();
+      let data: any = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        data = {};
+      }
+      if (!res.ok || data.status === 'error') {
+        throw new Error(data.reason || `Visual DB build failed (${res.status})`);
+      }
+      setVisualDbStatus((current: any) => ({
+        ...(current || {}),
+        active_map_db_path: data.output_dir,
+        active_tile_zoom_level: data.zoom_level,
+      }));
+      localStorage.setItem('chaox.visualMapDbPath', data.output_dir);
+      setVisualDbMessage(`Visual localization DB ready: ${data.tile_count} tiles at z${data.zoom_level}`);
+    } catch (error) {
+      setVisualDbMessage(error instanceof Error ? error.message : 'Visual DB build failed');
+    } finally {
+      setVisualDbBusy(false);
+    }
   };
 
   const handleClearSelection = () => {
@@ -461,6 +515,23 @@ export const OfflineMapsPanel = ({
             <div className="flex items-center gap-2">
               <Button variant="outline" className="flex-1" onClick={handleCancel}>Cancel</Button>
               <Button variant="destructive" className="flex-1">Clear Cache</Button>
+            </div>
+            <div className="rounded-md border border-border/60 bg-background/70 p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Visual Localization DB</div>
+                <div className="text-[10px] text-muted-foreground">Satellite z{maxZoom}</div>
+              </div>
+              <Button className="w-full" size="sm" onClick={handleBuildVisualDb} disabled={visualDbBusy}>
+                {visualDbBusy ? 'Preparing Visual DB...' : 'Use Cache For Visual Localization'}
+              </Button>
+              {visualDbStatus?.active_map_db_path && (
+                <div className="text-[10px] text-muted-foreground break-all">
+                  Active DB: {visualDbStatus.active_map_db_path}
+                </div>
+              )}
+              {visualDbMessage && (
+                <div className="text-[11px] text-muted-foreground">{visualDbMessage}</div>
+              )}
             </div>
           </div>
 

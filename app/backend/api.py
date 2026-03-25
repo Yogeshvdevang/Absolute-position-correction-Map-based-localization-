@@ -13,7 +13,10 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from .models import VehicleState, MissionPlan, MissionItem
@@ -26,11 +29,16 @@ from .maps.raster_manager import RasterManager
 from .ai_engine.coarse_match import coarse_match
 from .ai_engine.ekf import EKF
 from .ai_engine.preprocess import preprocess_frame, Preprocessor
+from .benchmark import BenchmarkRunner
+from .benchmark.interfaces import BenchmarkRequest
+from .vendor_visual_localization.service import VisualLocalizationConfig, VisualLocalizationService
+from .icon_tracker_process import ManagedIconTrackerProcess
 
 # Configuration
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://localhost:8000")
 BRIDGE_WS = os.getenv("BRIDGE_WS", "ws://localhost:8000/ws")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "vehicle-1")
+ICON_TRACKER_BASE = os.getenv("ICON_TRACKER_BASE", "http://127.0.0.1:8090").rstrip("/")
 
 
 class Vehicle(BaseModel):
@@ -118,6 +126,31 @@ class RCStatus(BaseModel):
   updated_at: Optional[str] = None
 
 
+class IconTrackerTargetRequest(BaseModel):
+  track_id: int
+
+
+class IconTrackerModelRequest(BaseModel):
+  model_path: str
+
+
+class IconTrackerClassRequest(BaseModel):
+  class_name: str
+
+
+class IconTrackerMoveRequest(BaseModel):
+  yaw: int = 0
+  pitch: int = 0
+
+
+class IconTrackerZoomRequest(BaseModel):
+  direction: str
+
+
+class IconTrackerSpeedRequest(BaseModel):
+  speed_scale: float
+
+
 app = FastAPI(title="C2 API", version="0.1.0")
 app.add_middleware(
   CORSMiddleware,
@@ -129,6 +162,15 @@ app.add_middleware(
 
 # Resolve frontend build path for both dev and PyInstaller runtime.
 _runtime_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+_default_tracker_root = _runtime_root / "a18-mini-model-tracking"
+if not _default_tracker_root.exists():
+  _default_tracker_root = _runtime_root.parent / "a18-mini-model-tracking"
+ICON_TRACKER_ROOT = Path(os.getenv("ICON_TRACKER_ROOT", _default_tracker_root))
+ICON_TRACKER_CAMERA_IP = os.getenv("ICON_TRACKER_CAMERA_IP", "192.168.144.25")
+ICON_TRACKER_CAMERA_PORT = int(os.getenv("ICON_TRACKER_CAMERA_PORT", "37260"))
+ICON_TRACKER_RTSP_URL = os.getenv("ICON_TRACKER_RTSP_URL", f"rtsp://{ICON_TRACKER_CAMERA_IP}:8554/main.264")
+ICON_TRACKER_CAMERA_NAME = os.getenv("ICON_TRACKER_CAMERA_NAME", "A8 Mini")
+ICON_TRACKER_AUTOSTART = os.getenv("ICON_TRACKER_AUTOSTART", "1").strip().lower() in {"1", "true", "yes", "on"}
 FRONTEND_DIR = Path(os.getenv("FRONTEND_DIR", _runtime_root / "frontend" / "build"))
 if FRONTEND_DIR.exists():
   app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
@@ -175,6 +217,28 @@ apc_train_config: Dict[str, Any] = {
 }
 rc_config = RCConfig()
 rc_status = RCStatus()
+benchmark_runner = BenchmarkRunner()
+visual_localization = VisualLocalizationService(
+  VisualLocalizationConfig(
+    map_db_path=None,
+    device="cpu",
+    resize_size=800,
+    matcher_backend="superpoint_superglue",
+    enabled=False,
+  )
+)
+icon_tracker_process = ManagedIconTrackerProcess(
+  tracker_root=ICON_TRACKER_ROOT,
+  base_url=ICON_TRACKER_BASE,
+  camera_ip=ICON_TRACKER_CAMERA_IP,
+  camera_port=ICON_TRACKER_CAMERA_PORT,
+  rtsp_url=ICON_TRACKER_RTSP_URL,
+  camera_name=ICON_TRACKER_CAMERA_NAME,
+  enabled=ICON_TRACKER_AUTOSTART,
+)
+ICON_TRACKER_STATUS_CACHE_TTL_SECONDS = float(os.getenv("ICON_TRACKER_STATUS_CACHE_TTL_SECONDS", "0.35"))
+icon_tracker_status_cache: Dict[str, Any] = {"ts": 0.0, "payload": None}
+icon_tracker_status_lock = asyncio.Lock()
 
 # Offline tiles cache
 TILE_CACHE_DIR = Path(os.getenv("TILE_CACHE_DIR", _runtime_root / "tile-cache"))
@@ -209,6 +273,13 @@ class TileDownloadRequest(BaseModel):
   max_tiles: Optional[int] = None
 
 
+class VisualLocalizationTileDbRequest(BaseModel):
+  map_type: str = Field("satellite", description="Tile cache map type to export")
+  zoom_level: Optional[int] = Field(None, description="Specific zoom level to flatten into the DB")
+  output_name: Optional[str] = Field(None, description="Optional folder name for the exported DB")
+  activate_for_visual_localization: bool = Field(True, description="Whether to set this DB as the active VL DB")
+
+
 def _lonlat_to_tile(lon: float, lat: float, z: int) -> Tuple[int, int]:
   import math
   lat = max(min(lat, 85.05112878), -85.05112878)
@@ -232,6 +303,76 @@ def _estimate_tiles(bbox: Dict[str, float], min_zoom: int, max_zoom: int) -> int
     x_min, x_max, y_min, y_max = _tile_ranges_for_bbox(bbox, z)
     total += (x_max - x_min + 1) * (y_max - y_min + 1)
   return total
+
+
+VISUAL_TILE_DB_DIR = Path(os.getenv("VISUAL_TILE_DB_DIR", _runtime_root / "visual-map-dbs"))
+VISUAL_TILE_DB_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _list_cached_zoom_levels(map_type: str) -> List[int]:
+  map_root = TILE_CACHE_DIR / map_type
+  if not map_root.exists():
+    return []
+  zoom_levels: List[int] = []
+  for child in map_root.iterdir():
+    if child.is_dir() and child.name.isdigit():
+      zoom_levels.append(int(child.name))
+  return sorted(zoom_levels)
+
+
+def _export_tile_cache_to_visual_db(req: VisualLocalizationTileDbRequest) -> Dict[str, Any]:
+  map_root = TILE_CACHE_DIR / req.map_type
+  if not map_root.exists():
+    raise FileNotFoundError(f"No cache found for map type: {req.map_type}")
+
+  available_zoom_levels = _list_cached_zoom_levels(req.map_type)
+  if not available_zoom_levels:
+    raise FileNotFoundError(f"No cached zoom levels found for map type: {req.map_type}")
+
+  zoom_level = req.zoom_level if req.zoom_level is not None else max(available_zoom_levels)
+  if zoom_level not in available_zoom_levels:
+    raise FileNotFoundError(f"Zoom level {zoom_level} is not cached for map type: {req.map_type}")
+
+  source_zoom_dir = map_root / str(zoom_level)
+  output_name = req.output_name or f"{req.map_type}-z{zoom_level}"
+  output_dir = VISUAL_TILE_DB_DIR / output_name
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  exported = 0
+  for x_dir in sorted(source_zoom_dir.iterdir()):
+    if not x_dir.is_dir() or not x_dir.name.isdigit():
+      continue
+    x_value = int(x_dir.name)
+    for tile_file in sorted(x_dir.glob("*.png")):
+      try:
+        y_value = int(tile_file.stem)
+      except ValueError:
+        continue
+      target_file = output_dir / f"{x_value}_{y_value}_{zoom_level}.png"
+      if not target_file.exists() or tile_file.stat().st_mtime > target_file.stat().st_mtime:
+        target_file.write_bytes(tile_file.read_bytes())
+      exported += 1
+
+  if exported == 0:
+    raise FileNotFoundError(f"No PNG tiles found in cache for map type {req.map_type} at zoom {zoom_level}")
+
+  if req.activate_for_visual_localization:
+    updated_config = visual_localization.config.model_copy(update={
+      "map_db_path": str(output_dir),
+      "tile_zoom_level": int(zoom_level),
+    })
+    visual_localization.update(updated_config)
+
+  return {
+    "status": "ready",
+    "map_type": req.map_type,
+    "zoom_level": int(zoom_level),
+    "tile_count": exported,
+    "output_dir": str(output_dir),
+    "available_zoom_levels": available_zoom_levels,
+    "activated": req.activate_for_visual_localization,
+    "visual_localization_config": visual_localization.config.model_dump(),
+  }
 
 
 async def _download_tiles(req: TileDownloadRequest):
@@ -335,7 +476,52 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
   apc_last_ts = now
   apc_ekf.predict(dt)
 
-  img = _decode_frame(frame.image_b64) or frame_buffer.get()
+  img = _decode_frame(frame.image_b64)
+  if img is None:
+    img = frame_buffer.get()
+  if img is not None and visual_localization.config.enabled:
+    try:
+      external_result = visual_localization.run_frame(
+        image=img,
+        frame_id=frame.frame_id,
+        lat=frame.lat,
+        lon=frame.lon,
+        alt=frame.alt,
+        yaw=frame.yaw,
+        pitch=frame.pitch,
+        roll=frame.roll,
+      )
+      if external_result.get("success"):
+        fused_lat = external_result.get("predicted_lat")
+        fused_lon = external_result.get("predicted_lon")
+        if fused_lat is not None and fused_lon is not None:
+          z = np.array([[fused_lon], [fused_lat]])
+          apc_ekf.update(z)
+          state = apc_ekf.state()
+          fused_lon = float(state[0, 0])
+          fused_lat = float(state[1, 0])
+        return APCResult(
+          frame_id=frame.frame_id,
+          timestamp=frame.timestamp,
+          lat=fused_lat,
+          lon=fused_lon,
+          alt=frame.alt,
+          yaw=frame.yaw,
+          confidence=0.88,
+          error_radius_m=external_result.get("distance_m") or 25.0,
+          source="visual_localization",
+          meta={
+            **(frame.meta or {}),
+            "matched_image": external_result.get("matched_image"),
+            "num_inliers": external_result.get("num_inliers"),
+            "external_output_dir": external_result.get("output_dir"),
+          },
+        )
+    except Exception as exc:
+      if frame.meta is None:
+        frame.meta = {}
+      frame.meta["visual_localization_error"] = str(exc)
+
   if img is None or apc_raster is None or frame.lat is None or frame.lon is None:
     return _mock_apc_correction(frame)
 
@@ -409,6 +595,19 @@ async def startup_event():
       apc_raster = None
       apc_preprocessor = None
   asyncio.create_task(_bridge_telemetry_loop())
+  try:
+    if ICON_TRACKER_AUTOSTART:
+      asyncio.create_task(asyncio.to_thread(icon_tracker_process.ensure_running, 2.5))
+  except Exception:
+    pass
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+  try:
+    icon_tracker_process.shutdown()
+  except Exception:
+    pass
 
 
 async def _bridge_telemetry_loop():
@@ -778,6 +977,28 @@ async def tiles_cancel():
   return {"status": "stopping"}
 
 
+@app.get("/tiles/visual-localization-db")
+async def visual_localization_tile_db_status():
+  return {
+    "cache_root": str(TILE_CACHE_DIR),
+    "db_root": str(VISUAL_TILE_DB_DIR),
+    "cached_zoom_levels": {
+      map_type: _list_cached_zoom_levels(map_type)
+      for map_type in TILE_TEMPLATES.keys()
+    },
+    "active_map_db_path": visual_localization.config.map_db_path,
+    "active_tile_zoom_level": visual_localization.config.tile_zoom_level,
+  }
+
+
+@app.post("/tiles/visual-localization-db")
+async def visual_localization_tile_db_prepare(req: VisualLocalizationTileDbRequest):
+  try:
+    return _export_tile_cache_to_visual_db(req)
+  except FileNotFoundError as exc:
+    return JSONResponse(status_code=404, content={"status": "error", "reason": str(exc)})
+
+
 @app.get("/tiles/{map_type}/{z}/{x}/{y}.png")
 async def get_tile(map_type: str, z: int, x: int, y: str):
   try:
@@ -788,6 +1009,212 @@ async def get_tile(map_type: str, z: int, x: int, y: str):
   if path.exists():
     return FileResponse(path)
   return {"error": "tile not found"}, 404
+
+
+@app.get("/benchmark/methods")
+async def benchmark_methods():
+  return benchmark_runner.list_methods()
+
+
+@app.post("/benchmark/run")
+async def benchmark_run(request: BenchmarkRequest):
+  return benchmark_runner.run(request)
+
+
+async def _icon_tracker_proxy(path: str, payload: Optional[Dict[str, Any]] = None, timeout_seconds: float = 6.0):
+  url = f"{ICON_TRACKER_BASE}{path}"
+  try:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+      if payload is None:
+        response = await client.get(url)
+      else:
+        response = await client.post(url, json=payload)
+  except Exception as exc:
+    # Attempt to boot the bundled icon_model_tracker service and retry once.
+    started = await asyncio.to_thread(icon_tracker_process.ensure_running, 6.0)
+    if started:
+      try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+          if payload is None:
+            response = await client.get(url)
+          else:
+            response = await client.post(url, json=payload)
+      except Exception as retry_exc:
+        return JSONResponse(
+          status_code=502,
+          content={
+            "ok": False,
+            "error": f"Icon tracker is unreachable at {ICON_TRACKER_BASE}",
+            "details": str(retry_exc),
+          },
+        )
+    else:
+      return JSONResponse(
+        status_code=502,
+        content={
+          "ok": False,
+          "error": f"Icon tracker is unreachable at {ICON_TRACKER_BASE}",
+          "details": str(exc),
+        },
+      )
+
+  try:
+    data = response.json()
+  except Exception:
+    data = {"raw": response.text}
+
+  if response.status_code >= 400:
+    return JSONResponse(
+      status_code=response.status_code,
+      content={"ok": False, "error": "Icon tracker request failed", "upstream": data},
+    )
+  return data
+
+
+def _is_tracker_error_response(result: Any) -> bool:
+  return isinstance(result, JSONResponse)
+
+
+def _invalidate_icon_tracker_status_cache() -> None:
+  icon_tracker_status_cache["ts"] = 0.0
+  icon_tracker_status_cache["payload"] = None
+
+
+async def _external_stream_generator(stream_url: str):
+  try:
+    stream_timeout = httpx.Timeout(connect=4.0, read=None, write=4.0, pool=4.0)
+    async with httpx.AsyncClient(timeout=stream_timeout) as client:
+      async with client.stream("GET", stream_url) as response:
+        if response.status_code >= 400:
+          message = f"icon-tracker stream upstream error: {response.status_code}"
+          yield f"--frame\r\nContent-Type: text/plain\r\n\r\n{message}\r\n".encode("utf-8")
+          return
+        async for chunk in response.aiter_bytes():
+          if chunk:
+            yield chunk
+  except Exception as exc:
+    message = f"icon-tracker stream unavailable: {exc}"
+    yield f"--frame\r\nContent-Type: text/plain\r\n\r\n{message}\r\n".encode("utf-8")
+
+
+@app.get("/integrations/icon-tracker/status")
+async def icon_tracker_status():
+  now = asyncio.get_running_loop().time()
+  cached_payload = icon_tracker_status_cache.get("payload")
+  cached_ts = float(icon_tracker_status_cache.get("ts", 0.0) or 0.0)
+  if cached_payload is not None and (now - cached_ts) < ICON_TRACKER_STATUS_CACHE_TTL_SECONDS:
+    return cached_payload
+
+  async with icon_tracker_status_lock:
+    now = asyncio.get_running_loop().time()
+    cached_payload = icon_tracker_status_cache.get("payload")
+    cached_ts = float(icon_tracker_status_cache.get("ts", 0.0) or 0.0)
+    if cached_payload is not None and (now - cached_ts) < ICON_TRACKER_STATUS_CACHE_TTL_SECONDS:
+      return cached_payload
+
+    result = await _icon_tracker_proxy("/api/status", None, timeout_seconds=2.0)
+    if not _is_tracker_error_response(result):
+      icon_tracker_status_cache["payload"] = result
+      icon_tracker_status_cache["ts"] = asyncio.get_running_loop().time()
+    return result
+
+
+@app.post("/integrations/icon-tracker/select-target")
+async def icon_tracker_select_target(req: IconTrackerTargetRequest):
+  result = await _icon_tracker_proxy("/api/select-target", {"track_id": req.track_id}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/select-model")
+async def icon_tracker_select_model(req: IconTrackerModelRequest):
+  result = await _icon_tracker_proxy("/api/select-model", {"model_path": req.model_path}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/toggle-class")
+async def icon_tracker_toggle_class(req: IconTrackerClassRequest):
+  result = await _icon_tracker_proxy("/api/toggle-class", {"class_name": req.class_name}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/toggle-tracking")
+async def icon_tracker_toggle_tracking():
+  result = await _icon_tracker_proxy("/api/toggle-tracking", {}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/stop-tracking")
+async def icon_tracker_stop_tracking():
+  result = await _icon_tracker_proxy("/api/stop-tracking", {}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/center")
+async def icon_tracker_center():
+  result = await _icon_tracker_proxy("/api/center", {}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/move")
+async def icon_tracker_move(req: IconTrackerMoveRequest):
+  result = await _icon_tracker_proxy("/api/move", {"yaw": req.yaw, "pitch": req.pitch}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/stop-motion")
+async def icon_tracker_stop_motion():
+  result = await _icon_tracker_proxy("/api/stop-motion", {}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/zoom")
+async def icon_tracker_zoom(req: IconTrackerZoomRequest):
+  result = await _icon_tracker_proxy("/api/zoom", {"direction": req.direction}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/set-camera-speed")
+async def icon_tracker_set_camera_speed(req: IconTrackerSpeedRequest):
+  result = await _icon_tracker_proxy("/api/set-camera-speed", {"speed_scale": req.speed_scale}, timeout_seconds=2.0)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.get("/integrations/icon-tracker/stream.mjpg")
+async def icon_tracker_stream():
+  await asyncio.to_thread(icon_tracker_process.ensure_running, 6.0)
+  stream_url = f"{ICON_TRACKER_BASE}/stream.mjpg"
+  # Use tracker-native MJPEG stream directly to avoid proxy buffering latency.
+  return RedirectResponse(url=stream_url, status_code=307)
+
+
+@app.get("/integrations/visual-localization")
+async def visual_localization_get():
+  return visual_localization.get_status()
+
+
+@app.post("/integrations/visual-localization")
+async def visual_localization_set(payload: VisualLocalizationConfig):
+  return visual_localization.update(payload)
+
+
+@app.post("/integrations/visual-localization/probe")
+async def visual_localization_probe():
+  return visual_localization.probe()
+
+
+@app.post("/integrations/visual-localization/self-test")
+async def visual_localization_self_test():
+  return visual_localization.self_test()
 
 
 if __name__ == "__main__":

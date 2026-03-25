@@ -1,0 +1,16 @@
+# Optional ML dependencies for learned benchmark matchers.
+# Install the correct PyTorch build for your platform first:
+# https://pytorch.org/get-started/locally/
+
+kornia>=0.7
+pandas>=2.0
+scipy>=1.10
+tqdm>=4.66
+matplotlib>=3.7
+pyyaml>=6.0
+
+# LightGlue is provided by its upstream project rather than this file.
+# Install after PyTorch with one of the upstream methods, for example:
+# git clone https://github.com/cvg/LightGlue.git
+# cd LightGlue
+# python -m pip install -e .

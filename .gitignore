@@ -26,3 +26,8 @@ venv/
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime cache/data artifacts
+tile-cache/
+app/tile-cache/
+app/visual-map-dbs/

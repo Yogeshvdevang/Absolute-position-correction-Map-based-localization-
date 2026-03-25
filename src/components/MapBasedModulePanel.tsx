@@ -7,11 +7,9 @@ import { Switch } from './ui/switch';
 import { Slider } from './ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
+import { Badge } from './ui/badge';
 
-interface MapBasedModulePanelProps {
-  onOpenAssets?: () => void;
-}
-
+const API_BASE = import.meta.env.VITE_CHAOX_API_BASE || 'http://localhost:9000';
 const DEFAULT_WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 const DEFAULT_LIVE_FEED_URL = `${DEFAULT_WS_BASE}/camera`;
 const DEFAULT_TELEMETRY_URL = `${DEFAULT_WS_BASE}/ws/telemetry`;
@@ -27,9 +25,17 @@ const ControlRow = ({ label, children }: { label: string; children: ReactNode })
   </div>
 );
 
-export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) => {
+export const MapBasedModulePanel = () => {
   const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceFeedSocketRef = useRef<WebSocket | null>(null);
+  const backendFeedSocketRef = useRef<WebSocket | null>(null);
   const [modelFileName, setModelFileName] = useState<string | null>(null);
+  const [tileMatcherBackend, setTileMatcherBackend] = useState('native');
+  const [visualMapDbPath, setVisualMapDbPath] = useState('');
+  const [visualProbe, setVisualProbe] = useState<any | null>(null);
+  const [visualSelfTest, setVisualSelfTest] = useState<any | null>(null);
+  const [visualStatus, setVisualStatus] = useState<string | null>(null);
+  const [visualBusy, setVisualBusy] = useState(false);
 
   const [liveFeedUrlInput, setLiveFeedUrlInput] = useState(DEFAULT_LIVE_FEED_URL);
   const [liveFeedUrlSaved, setLiveFeedUrlSaved] = useState<string | null>(DEFAULT_LIVE_FEED_URL);
@@ -44,6 +50,46 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
   const [mapMatchStatus, setMapMatchStatus] = useState<string | null>(null);
   const [lastInit, setLastInit] = useState<{ lat: number; lon: number; compass: number } | null>(null);
   const [liveFeedStatus, setLiveFeedStatus] = useState<string | null>(null);
+  const [apcResult, setApcResult] = useState<any | null>(null);
+  const [mapMatchBusy, setMapMatchBusy] = useState(false);
+
+  const logPanelStatus = (scope: string, status: string | null) => {
+    if (!status) return;
+    const normalized = status.trim();
+    if (!normalized) return;
+    const lower = normalized.toLowerCase();
+
+    if (
+      lower.includes('fail') ||
+      lower.includes('error') ||
+      lower.includes('missing') ||
+      lower.includes('invalid') ||
+      lower.includes('disconnected') ||
+      lower.includes('no coordinates')
+    ) {
+      console.error(`[${scope}] ${normalized}`);
+      return;
+    }
+
+    if (lower.includes('warning') || lower.includes('waiting')) {
+      console.warn(`[${scope}] ${normalized}`);
+      return;
+    }
+
+    console.info(`[${scope}] ${normalized}`);
+  };
+
+  useEffect(() => {
+    logPanelStatus('APC', mapMatchStatus);
+  }, [mapMatchStatus]);
+
+  useEffect(() => {
+    logPanelStatus('Visual Localization', visualStatus);
+  }, [visualStatus]);
+
+  useEffect(() => {
+    logPanelStatus('Live Feed', liveFeedStatus);
+  }, [liveFeedStatus]);
 
   useEffect(() => {
     const savedFeed = localStorage.getItem('chaox.liveFeedUrl');
@@ -62,6 +108,42 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
     } else {
       localStorage.setItem('chaox.telemetryUrl', DEFAULT_TELEMETRY_URL);
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      sourceFeedSocketRef.current?.close();
+      backendFeedSocketRef.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadVisualLocalization = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/integrations/visual-localization`);
+        if (!response.ok) {
+          throw new Error(`Vendored module load failed (${response.status})`);
+        }
+        const payload = await response.json();
+        if (cancelled) return;
+        const config = payload.config || {};
+        setVisualMapDbPath(config.map_db_path || localStorage.getItem('chaox.visualMapDbPath') || '');
+        setTileMatcherBackend(config.enabled ? 'visual_localization' : 'native');
+        setVisualProbe(payload.probe || null);
+      } catch (error) {
+        if (!cancelled) {
+          setVisualStatus(error instanceof Error ? error.message : 'Failed to load internal visual localization module');
+        }
+      }
+    };
+
+    void loadVisualLocalization();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSaveLiveFeed = () => {
@@ -85,49 +167,144 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
       setLiveFeedStatus('Set a live feed URL first.');
       return;
     }
-    setLiveFeedStatus(`Connected to ${liveFeedUrlSaved}`);
+    const backendCameraWs = `${DEFAULT_WS_BASE}/camera`;
+
+    if (liveFeedUrlSaved === backendCameraWs) {
+      setLiveFeedStatus(`Backend camera ingest is configured at ${backendCameraWs}. Waiting for a producer to push frames.`);
+      return;
+    }
+
+    sourceFeedSocketRef.current?.close();
+    backendFeedSocketRef.current?.close();
+
+    const sourceSocket = new WebSocket(liveFeedUrlSaved);
+    const backendSocket = new WebSocket(backendCameraWs);
+
+    sourceFeedSocketRef.current = sourceSocket;
+    backendFeedSocketRef.current = backendSocket;
+
+    backendSocket.onopen = () => {
+      setLiveFeedStatus(`Backend ingest ready at ${backendCameraWs}`);
+    };
+
+    sourceSocket.onopen = () => {
+      setLiveFeedStatus(`Bridging live feed from ${liveFeedUrlSaved}`);
+    };
+
+    sourceSocket.onmessage = (event) => {
+      if (typeof event.data === 'string' && backendSocket.readyState === WebSocket.OPEN) {
+        backendSocket.send(event.data);
+      }
+    };
+
+    sourceSocket.onerror = () => {
+      setLiveFeedStatus('Source live feed connection failed.');
+    };
+
+    backendSocket.onerror = () => {
+      setLiveFeedStatus('Backend camera ingest connection failed.');
+    };
+
+    sourceSocket.onclose = () => {
+      setLiveFeedStatus('Source live feed disconnected.');
+    };
   };
 
   const handleMapMatch = async () => {
-    setMapMatchStatus('Initializing...');
-    if (useManualInit) {
-      const lat = Number(manualLat);
-      const lon = Number(manualLon);
-      const compass = Number(manualCompass);
-      if (![lat, lon, compass].every((v) => Number.isFinite(v))) {
-        setMapMatchStatus('Enter valid manual lat/lon/compass.');
-        return;
-      }
-      setLastInit({ lat, lon, compass });
-      setMapMatchStatus('Map matching started (manual init).');
-      return;
-    }
-    if (!telemetryUrlSaved) {
-      setMapMatchStatus('Set a telemetry URL first.');
-      return;
-    }
-    if (telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://')) {
-      setMapMatchStatus(`Telemetry WebSocket ready: ${telemetryUrlSaved}`);
-      return;
-    }
     try {
-      const res = await fetch(telemetryUrlSaved);
-      if (!res.ok) {
-        setMapMatchStatus(`Telemetry failed (${res.status}).`);
+      setMapMatchBusy(true);
+      setMapMatchStatus('Resolving initial pose...');
+
+      let initLat: number | null = null;
+      let initLon: number | null = null;
+      let initYaw: number | null = null;
+
+      if (useManualInit) {
+        initLat = Number(manualLat);
+        initLon = Number(manualLon);
+        initYaw = Number(manualCompass);
+        if (![initLat, initLon, initYaw].every((value) => Number.isFinite(value))) {
+          setMapMatchStatus('Enter valid manual lat/lon/compass.');
+          return;
+        }
+      } else if (telemetryUrlSaved && !(telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://'))) {
+        const res = await fetch(telemetryUrlSaved);
+        if (!res.ok) {
+          setMapMatchStatus(`Telemetry failed (${res.status}).`);
+          return;
+        }
+        const data = await res.json();
+        initLat = Number(data.lat);
+        initLon = Number(data.lon);
+        initYaw = Number(data.compass ?? data.yaw ?? 0);
+        if (![initLat, initLon, initYaw].every((value) => Number.isFinite(value))) {
+          setMapMatchStatus('Telemetry missing valid lat/lon/yaw fields.');
+          return;
+        }
+      } else if (lastInit) {
+        initLat = lastInit.lat;
+        initLon = lastInit.lon;
+        initYaw = lastInit.compass;
+      } else {
+        setMapMatchStatus('Set manual init or an HTTP telemetry source before locating.');
         return;
       }
-      const data = await res.json();
-      const lat = Number(data.lat);
-      const lon = Number(data.lon);
-      const compass = Number(data.compass);
-      if (![lat, lon, compass].every((v) => Number.isFinite(v))) {
-        setMapMatchStatus('Telemetry missing lat/lon/compass fields.');
+
+      setLastInit({ lat: initLat!, lon: initLon!, compass: initYaw! });
+
+      if (tileMatcherBackend === 'visual_localization') {
+        const saveResponse = await fetch(`${API_BASE}/integrations/visual-localization`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            map_db_path: visualMapDbPath || null,
+            device: 'cpu',
+            resize_size: 800,
+            matcher_backend: 'superpoint_superglue',
+            enabled: true,
+          }),
+        });
+        if (!saveResponse.ok) {
+          setMapMatchStatus(`Visual localization provider save failed (${saveResponse.status}).`);
+          return;
+        }
+      }
+
+      setMapMatchStatus('Running localization on latest frame...');
+      const response = await fetch(`${API_BASE}/apc/frame`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          frame_id: `ui-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          lat: initLat,
+          lon: initLon,
+          yaw: initYaw,
+          meta: {
+            requested_from: 'map_based_module_panel',
+            backend: tileMatcherBackend,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        setMapMatchStatus(`Localization request failed (${response.status}).`);
         return;
       }
-      setLastInit({ lat, lon, compass });
-      setMapMatchStatus('Map matching started (telemetry init).');
+
+      const payload = await response.json();
+      setApcResult(payload);
+      if (payload.lat !== null && payload.lon !== null) {
+        setMapMatchStatus(
+          `Located by ${payload.source}: ${Number(payload.lat).toFixed(6)}, ${Number(payload.lon).toFixed(6)}`
+        );
+      } else {
+        setMapMatchStatus(`Localization returned no coordinates. Source: ${payload.source}`);
+      }
     } catch {
-      setMapMatchStatus('Telemetry request failed (network).');
+      setMapMatchStatus('Localization request failed.');
+    } finally {
+      setMapMatchBusy(false);
     }
   };
 
@@ -139,17 +316,109 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
     const file = event.target.files?.[0];
     setModelFileName(file ? file.name : null);
   };
+
+  const handleProbeVisualLocalization = async () => {
+    setVisualBusy(true);
+    setVisualStatus('Checking internal visual localization module...');
+    try {
+      const response = await fetch(`${API_BASE}/integrations/visual-localization/probe`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error(`Probe failed (${response.status})`);
+      }
+      const payload = await response.json();
+      setVisualProbe(payload);
+      setVisualStatus(payload.valid ? 'Internal visual localization module is ready.' : payload.reason || 'Module check failed.');
+    } catch (error) {
+      setVisualStatus(error instanceof Error ? error.message : 'Probe failed');
+    } finally {
+      setVisualBusy(false);
+    }
+  };
+
+  const handleUseVisualLocalization = async () => {
+    setVisualBusy(true);
+    setVisualStatus('Saving vendored visual localization config...');
+    try {
+      const response = await fetch(`${API_BASE}/integrations/visual-localization`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          map_db_path: visualMapDbPath || null,
+          device: 'cpu',
+          resize_size: 800,
+          matcher_backend: 'superpoint_superglue',
+          enabled: tileMatcherBackend === 'visual_localization',
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Save failed (${response.status})`);
+      }
+      const payload = await response.json();
+      setVisualProbe(payload.probe || null);
+      if (visualMapDbPath) {
+        localStorage.setItem('chaox.visualMapDbPath', visualMapDbPath);
+      }
+      setVisualStatus(payload.probe?.valid ? 'Vendored visual localization config saved.' : 'Config saved, but the internal module is not ready yet.');
+    } catch (error) {
+      setVisualStatus(error instanceof Error ? error.message : 'Save failed');
+    } finally {
+      setVisualBusy(false);
+    }
+  };
+
+  const handleVisualLocalizationSelfTest = async () => {
+    setVisualBusy(true);
+    setVisualStatus('Running internal visual localization self-test...');
+    try {
+      const response = await fetch(`${API_BASE}/integrations/visual-localization/self-test`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error(`Self-test failed (${response.status})`);
+      }
+      const payload = await response.json();
+      setVisualSelfTest(payload);
+      setVisualStatus(payload.ok ? 'Internal visual localization self-test passed.' : payload.reason || 'Self-test failed.');
+    } catch (error) {
+      setVisualStatus(error instanceof Error ? error.message : 'Self-test failed');
+    } finally {
+      setVisualBusy(false);
+    }
+  };
+
+  const handleUseCachedVisualDb = async () => {
+    setVisualBusy(true);
+    setVisualStatus('Loading active cache-backed visual localization DB...');
+    try {
+      const response = await fetch(`${API_BASE}/tiles/visual-localization-db`);
+      if (!response.ok) {
+        throw new Error(`Cache DB lookup failed (${response.status})`);
+      }
+      const payload = await response.json();
+      const activePath = payload.active_map_db_path;
+      if (!activePath) {
+        throw new Error('No cache-backed visual localization DB is active yet.');
+      }
+      setVisualMapDbPath(activePath);
+      localStorage.setItem('chaox.visualMapDbPath', activePath);
+      setVisualStatus(`Loaded cache-backed DB: ${activePath}`);
+    } catch (error) {
+      setVisualStatus(error instanceof Error ? error.message : 'Cache DB lookup failed');
+    } finally {
+      setVisualBusy(false);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-panel border-r border-panel-border">
       <div className="p-3 border-b border-panel-border">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-xs text-muted-foreground uppercase tracking-[0.14em]">Map-Based Module</div>
-            <div className="text-sm font-semibold text-foreground">Absolute Position Correction</div>
-          </div>
-          <Button variant="outline" size="sm" onClick={onOpenAssets}>
-            Assets
-          </Button>
+        <div>
+          <div className="text-xs text-muted-foreground uppercase tracking-[0.14em]">Map-Based Module</div>
+          <div className="text-sm font-semibold text-foreground">Absolute Position Correction</div>
         </div>
       </div>
 
@@ -297,6 +566,70 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                       </SelectContent>
                     </Select>
                     <div className="col-span-2 space-y-2">
+                      <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Vendored Visual Localization</div>
+                          <Badge variant={visualProbe?.valid ? 'secondary' : 'outline'}>
+                            {visualProbe?.valid ? 'internal module ready' : 'not ready'}
+                          </Badge>
+                        </div>
+                        <Input
+                          className="h-8 text-xs"
+                          placeholder="Map DB path"
+                          value={visualMapDbPath}
+                          onChange={(event) => setVisualMapDbPath(event.target.value)}
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <Button variant="outline" size="sm" onClick={handleProbeVisualLocalization} disabled={visualBusy}>
+                            Check Vendor
+                          </Button>
+                          <Button size="sm" onClick={handleUseVisualLocalization} disabled={visualBusy}>
+                            Save Config
+                          </Button>
+                        </div>
+                        <Button variant="outline" size="sm" onClick={handleUseCachedVisualDb} disabled={visualBusy}>
+                          Use Cached Tile DB
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={handleVisualLocalizationSelfTest} disabled={visualBusy}>
+                          Run Self-Test
+                        </Button>
+                        {visualProbe?.source_root && (
+                          <div className="text-[10px] text-muted-foreground break-all">
+                            Vendored source: {visualProbe.source_root}
+                          </div>
+                        )}
+                        {visualSelfTest && (
+                          <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Self-Test</div>
+                              <Badge variant={visualSelfTest.ok ? 'secondary' : 'destructive'}>
+                                {visualSelfTest.ok ? 'pass' : 'fail'}
+                              </Badge>
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              Stage: {visualSelfTest.stage || '--'}
+                            </div>
+                            {visualSelfTest.map_mode && (
+                              <div className="text-[11px] text-muted-foreground">
+                                Map mode: {visualSelfTest.map_mode}
+                              </div>
+                            )}
+                            {visualSelfTest.num_map_images !== undefined && (
+                              <div className="text-[11px] text-muted-foreground">
+                                Indexed images: {visualSelfTest.num_map_images}
+                              </div>
+                            )}
+                            {visualSelfTest.reason && (
+                              <div className="text-[11px] text-muted-foreground">
+                                {visualSelfTest.reason}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {visualStatus && (
+                          <div className="text-[11px] text-muted-foreground">{visualStatus}</div>
+                        )}
+                      </div>
                       <ControlRow label="Fine-Tuned Model">
                         <Switch />
                       </ControlRow>
@@ -356,7 +689,9 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                 <div className="space-y-3">
                   <SectionLabel>Tile Settings</SectionLabel>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button variant="outline" size="sm" onClick={handleMapMatch}>Map Matching</Button>
+                    <Button variant="outline" size="sm" onClick={handleMapMatch} disabled={mapMatchBusy}>
+                      {mapMatchBusy ? 'Locating...' : 'Locate Drone'}
+                    </Button>
                     <Button variant="outline" size="sm" onClick={handleConnectLiveFeed}>Drone Live Feed</Button>
                   </div>
                   <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-2">
@@ -408,8 +743,24 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
                   </div>
                   <div className="rounded-md border border-border/60 bg-background/60 p-2">
                     <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">AI/ML Feed</div>
-                    <div className="mt-1 text-xs text-muted-foreground">Waiting for frames...</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {liveFeedStatus || 'Waiting for frames...'}
+                    </div>
                   </div>
+                  {apcResult && (
+                    <div className="rounded-md border border-border/60 bg-background/60 p-2 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Latest Fix</div>
+                        <Badge variant="secondary">{apcResult.source || 'apc'}</Badge>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Lat/Lon: {apcResult.lat?.toFixed?.(6) ?? '--'}, {apcResult.lon?.toFixed?.(6) ?? '--'}
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Confidence: {apcResult.confidence ?? '--'} | Error Radius: {apcResult.error_radius_m ?? '--'} m
+                      </div>
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <ControlRow label="Tile Size (m)">
                       <Input className="h-8 w-[120px] text-xs" placeholder="64" />
@@ -428,6 +779,30 @@ export const MapBasedModulePanel = ({ onOpenAssets }: MapBasedModulePanelProps) 
 
                   <SectionLabel>Matching</SectionLabel>
                   <div className="space-y-2">
+                    <ControlRow label="Tile Matching Backend">
+                      <Select
+                        value={tileMatcherBackend}
+                        onValueChange={(value) => {
+                          setTileMatcherBackend(value);
+                        }}
+                      >
+                        <SelectTrigger className="h-8 w-[180px] text-xs">
+                          <SelectValue placeholder="Backend" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="native">Native APC</SelectItem>
+                          <SelectItem value="orb">ORB + RANSAC</SelectItem>
+                          <SelectItem value="visual_localization">Visual Localization</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </ControlRow>
+                    {tileMatcherBackend === 'visual_localization' && (
+                      <div className="rounded-md border border-border/60 bg-background/60 p-2 text-[11px] text-muted-foreground">
+                        {visualProbe?.valid
+                          ? 'Using internal visual localization pipeline.'
+                          : 'Visual localization is selected, but the internal module is not ready yet.'}
+                      </div>
+                    )}
                     <ControlRow label="Similarity Metric">
                       <Select defaultValue="cosine">
                         <SelectTrigger className="h-8 w-[140px] text-xs">

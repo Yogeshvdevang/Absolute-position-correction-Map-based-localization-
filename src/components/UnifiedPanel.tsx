@@ -5,6 +5,7 @@ import { MapBasedModulePanel } from './MapBasedModulePanel';
 import { TrainingPipelinePanel } from './TrainingPipelinePanel';
 import { OfflineMapsPanel } from './OfflineMapsPanel';
 import { TargetingPanel } from './TargetingPanel';
+import { TerminalPanel } from './TerminalPanel';
 import { Entity } from '@/types/entity';
 import { Track } from '@/types/track';
 interface UnifiedPanelProps {
@@ -100,7 +101,9 @@ export const UnifiedPanel = ({
     );
   }
 
-  return (
-    <MapBasedModulePanel onOpenAssets={() => setSelectedTab('assets')} />
-  );
+  if (activePanel === 'terminal') {
+    return <TerminalPanel />;
+  }
+
+  return <MapBasedModulePanel />;
 };

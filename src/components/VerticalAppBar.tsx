@@ -1,4 +1,4 @@
-import { Crosshair, Eye, Globe, Layers, PlaneTakeoff, SlidersHorizontal } from 'lucide-react';
+import { Crosshair, Eye, Globe, Layers, PlaneTakeoff, Settings, SlidersHorizontal, TerminalSquare } from 'lucide-react';
 import { Button } from './ui/button';
 
 interface VerticalAppBarProps {
@@ -6,9 +6,10 @@ interface VerticalAppBarProps {
   onPanelSelect: (panel: string) => void;
   activePanel: string | null;
   onOpenProtocolSim?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel, onOpenProtocolSim }: VerticalAppBarProps) => {
+export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel, onOpenProtocolSim, onOpenSettings }: VerticalAppBarProps) => {
   const getButtonClass = (panel: string) => 
     `h-10 w-10 p-0 hover:bg-white/10 hover:text-white ${activePanel === panel ? 'text-white ring-1 ring-white/40' : ''}`;
 
@@ -75,5 +76,23 @@ export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel, onOpenProto
       </Button>
 
       <div className="flex-1" />
+
+      <Button
+        variant="ghost"
+        size="sm"
+        className={getButtonClass('terminal')}
+        onClick={() => onPanelSelect('terminal')}
+      >
+        <TerminalSquare className="h-5 w-5" />
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-10 w-10 p-0 hover:bg-white/10 hover:text-white"
+        onClick={() => onOpenSettings?.()}
+      >
+        <Settings className="h-5 w-5" />
+      </Button>
     </div>;
 };

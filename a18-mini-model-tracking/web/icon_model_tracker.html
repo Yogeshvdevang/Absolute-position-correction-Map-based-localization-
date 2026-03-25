@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Icon Model Tracker</title>
+  <style>
+    :root {
+      --bg: #0f1720;
+      --panel: #152231;
+      --panel-2: #1d2d40;
+      --text: #ecf3f8;
+      --muted: #9fb2c3;
+      --accent: #4fb0ff;
+      --accent-2: #8be36b;
+      --warn: #ffad5c;
+      --line: rgba(255, 255, 255, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(79, 176, 255, 0.12), transparent 30%),
+        radial-gradient(circle at top right, rgba(139, 227, 107, 0.08), transparent 25%),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.4 "Segoe UI", sans-serif;
+    }
+    .shell {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 18px;
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      backdrop-filter: blur(8px);
+      overflow: hidden;
+      position: relative;
+      z-index: 1;
+    }
+    .panel.model-panel {
+      overflow: visible;
+      z-index: 40;
+    }
+    .panel-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(79, 176, 255, 0.16);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .viewer-wrap {
+      position: relative;
+      background: #05090d;
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+    }
+    #stream {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      cursor: pointer;
+    }
+    .toolbar {
+      padding: 14px 16px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      border-top: 1px solid var(--line);
+    }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 11px 14px;
+      color: var(--text);
+      background: var(--panel-2);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+    }
+    button.primary { background: linear-gradient(135deg, #2080d0, #49b0ff); }
+    button.good { background: linear-gradient(135deg, #2b8a3e, #67cf4b); }
+    button.warn { background: linear-gradient(135deg, #b56a17, #ffad5c); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .side { display: grid; gap: 18px; align-content: start; }
+    .stats { padding: 14px 16px; display: grid; gap: 10px; }
+    .row { display: grid; gap: 4px; }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .value { font-size: 15px; word-break: break-word; }
+
+    .model-grid {
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      overflow: visible;
+    }
+    .model-btn {
+      text-align: left;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 10px;
+      align-items: center;
+      min-height: 64px;
+      position: relative;
+      overflow: visible;
+    }
+    .model-btn.active {
+      border-color: rgba(139, 227, 107, 0.8);
+      box-shadow: 0 0 0 2px rgba(139, 227, 107, 0.18) inset;
+    }
+    .model-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(180deg, #356aa3, #2a5687);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    }
+    .model-icon svg {
+      width: 30px;
+      height: 30px;
+      display: block;
+    }
+    .model-icon svg * {
+      vector-effect: non-scaling-stroke;
+    }
+    .model-name { font-size: 13px; font-weight: 700; }
+    .model-classes {
+      font-size: 11px;
+      color: #eaf4ff;
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      top: 100%;
+      background: rgba(8, 12, 18, 0.96);
+      border: 1px solid rgba(79, 176, 255, 0.45);
+      border-radius: 10px;
+      padding: 7px 9px;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+      opacity: 0;
+      transform: translateY(4px);
+      pointer-events: none;
+      z-index: 20;
+      transition: opacity 120ms ease, transform 120ms ease;
+      white-space: normal;
+      word-break: break-word;
+    }
+    .model-btn:hover .model-classes,
+    .model-btn:focus-visible .model-classes {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .detect-list {
+      max-height: 180px;
+      overflow: auto;
+      padding: 0 16px 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .class-panel-body {
+      padding: 14px 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .class-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .class-chip {
+      border: 1px solid rgba(79, 176, 255, 0.35);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .class-chip.active {
+      border-color: rgba(139, 227, 107, 0.8);
+      background: rgba(139, 227, 107, 0.16);
+      color: #dff7d5;
+    }
+    .class-empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .det-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .det-item.selected {
+      border-color: rgba(79, 176, 255, 0.9);
+      box-shadow: 0 0 0 1px rgba(79, 176, 255, 0.25) inset;
+    }
+
+    .gimbal { padding: 14px 16px 18px; }
+    .speed-wrap { padding: 14px 16px 0; display: grid; gap: 8px; }
+    .speed-meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+    .speed-range { width: 100%; accent-color: #4fb0ff; }
+    .gimbal-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .gimbal-grid .spacer { visibility: hidden; }
+    .hint { padding: 0 16px 16px; color: var(--muted); }
+
+    @media (max-width: 980px) {
+      .shell { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="panel">
+      <div class="panel-head">
+        <div class="title">Icon Model Tracker</div>
+        <div class="badge" id="trackingBadge">Idle</div>
+      </div>
+      <div class="viewer-wrap">
+        <img id="stream" src="/stream.mjpg" alt="Live stream">
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="toolbar">
+        <button id="trackBtn" class="good">Start / Stop Tracking</button>
+        <button id="zoomInBtn">Zoom In</button>
+        <button id="zoomOutBtn">Zoom Out</button>
+        <button id="centerBtn" class="warn">Center Gimbal</button>
+      </div>
+      <div class="hint">
+        Pick a model icon, wait for detections, then click a detection box on the video. Tracking uses that detection's unique ID.
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="panel model-panel">
+        <div class="panel-head">
+          <div class="title">Models</div>
+        </div>
+        <div id="modelGrid" class="model-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="title">Classes</div>
+        </div>
+        <div class="class-panel-body">
+          <div class="hint" id="classHint" style="padding:0;">Select a model first. Then enable the classes you want to detect.</div>
+          <div id="classGrid" class="class-grid"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="title">Detections</div>
+        </div>
+        <div id="detectionList" class="detect-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="title">Status</div>
+        </div>
+        <div class="stats">
+          <div class="row">
+            <div class="label">Status</div>
+            <div class="value" id="statusText">Connecting...</div>
+          </div>
+          <div class="row">
+            <div class="label">Result</div>
+            <div class="value" id="resultText">No object selected.</div>
+          </div>
+          <div class="row">
+            <div class="label">Selected Model</div>
+            <div class="value" id="modelText">none</div>
+          </div>
+          <div class="row">
+            <div class="label">Tracking ID</div>
+            <div class="value" id="trackIdText">none</div>
+          </div>
+          <div class="row">
+            <div class="label">Yaw / Pitch</div>
+            <div class="value" id="anglesText">0.0 / 0.0</div>
+          </div>
+          <div class="row">
+            <div class="label">Current Target</div>
+            <div class="value" id="targetText">none</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div class="title">Camera Rotation</div>
+        </div>
+        <div class="speed-wrap">
+          <div class="speed-meta">
+            <span>Camera Speed</span>
+            <span id="speedValue">1.00x</span>
+          </div>
+          <input id="speedSlider" class="speed-range" type="range" min="20" max="300" step="5" value="100">
+        </div>
+        <div class="gimbal">
+          <div class="gimbal-grid">
+            <div class="spacer">.</div>
+            <button data-yaw="0" data-pitch="-18">Up</button>
+            <div class="spacer">.</div>
+            <button data-yaw="-18" data-pitch="0">Left</button>
+            <button id="stopMotionBtn">Stop</button>
+            <button data-yaw="18" data-pitch="0">Right</button>
+            <div class="spacer">.</div>
+            <button data-yaw="0" data-pitch="18">Down</button>
+            <div class="spacer">.</div>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <script>
+    const stream = document.getElementById("stream");
+    const overlay = document.getElementById("overlay");
+    const ctx = overlay.getContext("2d");
+    const trackBtn = document.getElementById("trackBtn");
+    const centerBtn = document.getElementById("centerBtn");
+    const zoomInBtn = document.getElementById("zoomInBtn");
+    const zoomOutBtn = document.getElementById("zoomOutBtn");
+    const trackingBadge = document.getElementById("trackingBadge");
+
+    const statusText = document.getElementById("statusText");
+    const resultText = document.getElementById("resultText");
+    const modelText = document.getElementById("modelText");
+    const trackIdText = document.getElementById("trackIdText");
+    const anglesText = document.getElementById("anglesText");
+    const targetText = document.getElementById("targetText");
+    const modelGrid = document.getElementById("modelGrid");
+    const classGrid = document.getElementById("classGrid");
+    const classHint = document.getElementById("classHint");
+    const detectionList = document.getElementById("detectionList");
+    const speedSlider = document.getElementById("speedSlider");
+    const speedValue = document.getElementById("speedValue");
+
+    let frameInfo = { width: 640, height: 360 };
+    let latestDetections = [];
+    let selectedTrackId = null;
+    let selectedModelPath = null;
+    let selectedModelClasses = [];
+    let enabledClasses = [];
+    let speedSyncTimer = null;
+    let lastModelsSignature = "";
+    let lastRenderedSelectedModelPath = null;
+
+    function sliderPctToScale(pct) {
+      return Number(pct) / 100;
+    }
+
+    function setSpeedLabel(scale) {
+      speedValue.textContent = `${Number(scale).toFixed(2)}x`;
+    }
+
+    async function setCameraSpeed(scale) {
+      await postJson("/api/set-camera-speed", { speed_scale: Number(scale) });
+    }
+
+    function fitCanvas() {
+      const rect = stream.getBoundingClientRect();
+      overlay.width = rect.width;
+      overlay.height = rect.height;
+      drawTapOverlay();
+    }
+
+    function drawTapOverlay() {
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      if (!latestDetections.length) return;
+      const scaleX = overlay.width / frameInfo.width;
+      const scaleY = overlay.height / frameInfo.height;
+
+      for (const det of latestDetections) {
+        const x = det.x * scaleX;
+        const y = det.y * scaleY;
+        const w = det.w * scaleX;
+        const h = det.h * scaleY;
+        const isSelected = selectedTrackId !== null && det.track_id === selectedTrackId;
+
+        ctx.strokeStyle = isSelected ? "#8be36b" : "rgba(79, 176, 255, 0.85)";
+        ctx.fillStyle = isSelected ? "rgba(139, 227, 107, 0.14)" : "rgba(79, 176, 255, 0.10)";
+        ctx.lineWidth = 2;
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeRect(x, y, w, h);
+
+        const label = `ID ${det.track_id} ${det.class_name}`;
+        ctx.fillStyle = "rgba(8,12,18,0.8)";
+        ctx.fillRect(x, Math.max(0, y - 20), Math.min(180, 8 + label.length * 6.5), 18);
+        ctx.fillStyle = "#eaf4ff";
+        ctx.font = "12px Segoe UI";
+        ctx.fillText(label, x + 4, Math.max(12, y - 7));
+      }
+    }
+
+    function pointerPos(event) {
+      const rect = overlay.getBoundingClientRect();
+      return {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      };
+    }
+
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+      return response.json();
+    }
+
+    async function selectModel(modelPath) {
+      await postJson("/api/select-model", { model_path: modelPath });
+      await refreshStatus();
+    }
+
+    async function selectTrack(trackId) {
+      await postJson("/api/select-target", { track_id: trackId });
+      await refreshStatus();
+    }
+
+    async function toggleClass(className) {
+      await postJson("/api/toggle-class", { class_name: className });
+      await refreshStatus();
+    }
+
+    function modelIconSvg(iconKey) {
+      switch (iconKey) {
+        case "aircraft":
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M33 6c2 0 3 1 3 3v14l13 7c2 1 2 4 0 5l-13-3v8l5 7c1 1 0 3-2 3h-3l-4-6-4 6h-3c-2 0-3-2-2-3l5-7v-8l-13 3c-2-1-2-4 0-5l13-7V9c0-2 1-3 3-3h2z" fill="#f7fbff"/>
+              <path d="M32 9v34M23 28l9 4 9-4" stroke="#dbeeff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          `;
+        case "drone":
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle cx="17" cy="17" r="8" fill="none" stroke="#f7fbff" stroke-width="3"/>
+              <circle cx="47" cy="17" r="8" fill="none" stroke="#f7fbff" stroke-width="3"/>
+              <circle cx="17" cy="47" r="8" fill="none" stroke="#f7fbff" stroke-width="3"/>
+              <circle cx="47" cy="47" r="8" fill="none" stroke="#f7fbff" stroke-width="3"/>
+              <path d="M22 22l10 6 10-6M22 42l10-6 10 6" fill="none" stroke="#dbeeff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M32 28l-6 4v5c0 3 3 6 6 6s6-3 6-6v-5l-6-4z" fill="#f7fbff"/>
+              <rect x="28" y="25" width="8" height="4" rx="2" fill="#f7fbff"/>
+              <circle cx="32" cy="36" r="2" fill="#2a5687"/>
+            </svg>
+          `;
+        case "person":
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle cx="32" cy="17" r="12" fill="#f7fbff"/>
+              <path d="M12 55c0-11.6 9.2-21 20-21s20 9.4 20 21H12z" fill="#f7fbff"/>
+            </svg>
+          `;
+        case "vehicle":
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M18 24h21c3 0 5 1 7 4l5 7v9H13V31c0-4 2-7 5-7z" fill="#f7fbff"/>
+              <path d="M22 24l4-7h15l5 7" fill="none" stroke="#dbeeff" stroke-width="2.5" stroke-linejoin="round"/>
+              <path d="M19 32h9M36 32h8" stroke="#2a5687" stroke-width="2.5" stroke-linecap="round"/>
+              <circle cx="23" cy="44" r="5" fill="#2a5687" stroke="#f7fbff" stroke-width="2.8"/>
+              <circle cx="43" cy="44" r="5" fill="#2a5687" stroke="#f7fbff" stroke-width="2.8"/>
+            </svg>
+          `;
+        case "vessel":
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M18 27h28l6 9c-1 9-10 14-20 14S13 45 12 36l6-9z" fill="#f7fbff"/>
+              <path d="M24 18h14v9H24z" fill="#f7fbff"/>
+              <path d="M20 52c3-2 6-2 9 0 3-2 6-2 9 0 3-2 6-2 9 0 3-2 6-2 9 0" fill="none" stroke="#dbeeff" stroke-width="2.6" stroke-linecap="round"/>
+              <path d="M30 18v-5h3v5" stroke="#dbeeff" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+          `;
+        default:
+          return `
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <rect x="15" y="12" width="34" height="40" rx="8" fill="#f7fbff"/>
+              <path d="M23 23h18M23 31h18M23 39h12" stroke="#2a5687" stroke-width="2.8" stroke-linecap="round"/>
+              <circle cx="43" cy="39" r="4" fill="#2a5687"/>
+            </svg>
+          `;
+      }
+    }
+
+    function renderModelButtons(models) {
+      const signature = JSON.stringify(models || []);
+      const selectedUnchanged = lastRenderedSelectedModelPath === selectedModelPath;
+      if (signature === lastModelsSignature && selectedUnchanged) {
+        return;
+      }
+
+      modelGrid.innerHTML = "";
+      for (const model of models) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "model-btn";
+        const isActive = Boolean(selectedModelPath && model.path === selectedModelPath);
+        if (isActive) {
+          button.classList.add("active");
+        }
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        button.title = isActive ? "Click to turn this model off" : "Click to turn this model on";
+
+        const icon = document.createElement("div");
+        icon.className = "model-icon";
+        icon.innerHTML = modelIconSvg(model.icon || "model");
+
+        const meta = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "model-name";
+        name.textContent = model.name;
+        const classes = document.createElement("div");
+        classes.className = "model-classes";
+        classes.textContent = (model.classes || []).join(", ") || "no classes";
+
+        meta.appendChild(name);
+        meta.appendChild(classes);
+        button.appendChild(icon);
+        button.appendChild(meta);
+
+        button.addEventListener("click", async () => {
+          await selectModel(model.path);
+        });
+        modelGrid.appendChild(button);
+      }
+      lastModelsSignature = signature;
+      lastRenderedSelectedModelPath = selectedModelPath;
+    }
+
+    function renderClassButtons(classes, enabled) {
+      classGrid.innerHTML = "";
+
+      if (!selectedModelPath) {
+        classHint.textContent = "Select a model first. Then enable the classes you want to detect.";
+        const empty = document.createElement("div");
+        empty.className = "class-empty";
+        empty.textContent = "No model selected.";
+        classGrid.appendChild(empty);
+        return;
+      }
+
+      if (!classes.length) {
+        classHint.textContent = "The selected model has no indexed classes.";
+        const empty = document.createElement("div");
+        empty.className = "class-empty";
+        empty.textContent = "No classes available.";
+        classGrid.appendChild(empty);
+        return;
+      }
+
+      classHint.textContent = enabled.length
+        ? "Enabled classes will be detected. Tap again to turn a class off."
+        : "No class is enabled. Tap one or more classes to start detection.";
+
+      const enabledSet = new Set(enabled || []);
+      for (const className of classes) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "class-chip";
+        const isActive = enabledSet.has(className);
+        if (isActive) {
+          button.classList.add("active");
+        }
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        button.textContent = className;
+        button.addEventListener("click", async () => {
+          await toggleClass(className);
+        });
+        classGrid.appendChild(button);
+      }
+    }
+
+    function renderDetectionList(detections) {
+      detectionList.innerHTML = "";
+      if (!detections.length) {
+        const empty = document.createElement("div");
+        empty.className = "det-item";
+        empty.textContent = selectedModelPath
+          ? "No detections for the enabled classes."
+          : "No detections yet for selected model.";
+        detectionList.appendChild(empty);
+        return;
+      }
+
+      for (const det of detections) {
+        const item = document.createElement("div");
+        item.className = "det-item";
+        if (selectedTrackId !== null && det.track_id === selectedTrackId) {
+          item.classList.add("selected");
+        }
+        item.textContent = `ID ${det.track_id} | ${det.class_name} | conf ${det.confidence.toFixed(2)} | x ${Math.round(det.cx)} y ${Math.round(det.cy)}`;
+        item.addEventListener("click", async () => {
+          await selectTrack(det.track_id);
+        });
+        detectionList.appendChild(item);
+      }
+    }
+
+    function pickDetectionFromTap(canvasX, canvasY) {
+      if (!latestDetections.length) return null;
+
+      const frameX = (canvasX / overlay.width) * frameInfo.width;
+      const frameY = (canvasY / overlay.height) * frameInfo.height;
+
+      const hits = latestDetections.filter((det) => {
+        return frameX >= det.x && frameX <= (det.x + det.w) && frameY >= det.y && frameY <= (det.y + det.h);
+      });
+      if (!hits.length) return null;
+
+      hits.sort((a, b) => {
+        const areaA = a.w * a.h;
+        const areaB = b.w * b.h;
+        if (areaA !== areaB) return areaA - areaB;
+        return b.confidence - a.confidence;
+      });
+      return hits[0];
+    }
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch("/api/status", { cache: "no-store" });
+        const data = await response.json();
+
+        frameInfo = data.frame || frameInfo;
+        latestDetections = data.detections || [];
+        selectedTrackId = data.selected_track_id;
+        selectedModelPath = data.selected_model_path;
+        selectedModelClasses = data.selected_model_classes || [];
+        enabledClasses = data.enabled_classes || [];
+
+        statusText.textContent = data.status || "n/a";
+        resultText.textContent = data.result || "n/a";
+        modelText.textContent = data.selected_model || "none";
+        trackIdText.textContent = data.selected_track_id ?? "none";
+        anglesText.textContent = `${data.yaw ?? 0.0} / ${data.pitch ?? 0.0}`;
+        const scale = Number(data.camera_speed_scale ?? 1.0);
+        speedSlider.value = String(Math.round(scale * 100));
+        setSpeedLabel(scale);
+
+        trackingBadge.textContent = data.tracking_enabled ? "Tracking" : "Idle";
+        trackingBadge.style.color = data.tracking_enabled ? "#8be36b" : "#4fb0ff";
+        trackingBadge.style.background = data.tracking_enabled ? "rgba(139, 227, 107, 0.16)" : "rgba(79, 176, 255, 0.16)";
+
+        if (data.target) {
+          const t = data.target;
+          targetText.textContent = `ID ${t.track_id ?? "?"} ${t.class_name} x=${Math.round(t.cx)} y=${Math.round(t.cy)} conf=${t.confidence.toFixed(2)}`;
+        } else {
+          targetText.textContent = "none";
+        }
+
+        renderModelButtons(data.models || []);
+        renderClassButtons(selectedModelClasses, enabledClasses);
+        renderDetectionList(latestDetections);
+        drawTapOverlay();
+      } catch (_err) {
+        statusText.textContent = "Status request failed.";
+      }
+    }
+
+    overlay.addEventListener("pointerdown", async (event) => {
+      const pos = pointerPos(event);
+      const selected = pickDetectionFromTap(pos.x, pos.y);
+      if (!selected) return;
+      await selectTrack(selected.track_id);
+    });
+
+    trackBtn.addEventListener("click", async () => {
+      await postJson("/api/toggle-tracking", {});
+      await refreshStatus();
+    });
+
+    centerBtn.addEventListener("click", async () => {
+      await postJson("/api/center", {});
+      await refreshStatus();
+    });
+
+    zoomInBtn.addEventListener("click", async () => {
+      await postJson("/api/zoom", { direction: "in" });
+      await refreshStatus();
+    });
+
+    zoomOutBtn.addEventListener("click", async () => {
+      await postJson("/api/zoom", { direction: "out" });
+      await refreshStatus();
+    });
+
+    document.getElementById("stopMotionBtn").addEventListener("click", async () => {
+      await postJson("/api/stop-tracking", {});
+      await refreshStatus();
+    });
+
+    speedSlider.addEventListener("input", async () => {
+      const scale = sliderPctToScale(speedSlider.value);
+      setSpeedLabel(scale);
+      if (speedSyncTimer) {
+        clearTimeout(speedSyncTimer);
+      }
+      speedSyncTimer = setTimeout(async () => {
+        try {
+          await setCameraSpeed(scale);
+        } catch (_err) {
+          statusText.textContent = "Failed to update camera speed.";
+        }
+      }, 120);
+    });
+
+    speedSlider.addEventListener("change", async () => {
+      const scale = sliderPctToScale(speedSlider.value);
+      setSpeedLabel(scale);
+      if (speedSyncTimer) {
+        clearTimeout(speedSyncTimer);
+        speedSyncTimer = null;
+      }
+      try {
+        await setCameraSpeed(scale);
+        await refreshStatus();
+      } catch (_err) {
+        statusText.textContent = "Failed to update camera speed.";
+      }
+    });
+
+    document.querySelectorAll("[data-yaw][data-pitch]").forEach((button) => {
+      const payload = {
+        yaw: Number(button.dataset.yaw),
+        pitch: Number(button.dataset.pitch),
+      };
+      button.addEventListener("pointerdown", async () => {
+        await postJson("/api/move", payload);
+      });
+      button.addEventListener("pointerup", async () => {
+        await postJson("/api/stop-motion", {});
+      });
+      button.addEventListener("pointerleave", async () => {
+        await postJson("/api/stop-motion", {});
+      });
+    });
+
+    stream.addEventListener("load", fitCanvas);
+    window.addEventListener("resize", fitCanvas);
+
+    fitCanvas();
+    refreshStatus();
+    setInterval(refreshStatus, 500);
+  </script>
+</body>
+</html>

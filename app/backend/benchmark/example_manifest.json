@@ -1,0 +1,34 @@
+{
+  "name": "apc-local-benchmark",
+  "description": "Example manifest for local and retrieval benchmark scaffolding",
+  "reference_height_m": 100.0,
+  "tile_overlap": 0.25,
+  "top_k": 5,
+  "samples": [
+    {
+      "sample_id": "sample-001",
+      "frame_path": "data/frame_001.png",
+      "ground_truth_lat": 28.61395,
+      "ground_truth_lon": 77.20895,
+      "yaw_deg": 15.0,
+      "altitude_m": 120.0,
+      "candidate_tiles": [
+        {
+          "tile_id": "tile-a",
+          "image_path": "data/tile_a.png",
+          "center_lat": 28.61395,
+          "center_lon": 77.20895
+        },
+        {
+          "tile_id": "tile-b",
+          "image_path": "data/tile_b.png",
+          "center_lat": 28.615,
+          "center_lon": 77.21
+        }
+      ],
+      "metadata": {
+        "terrain": "urban"
+      }
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
+import Documentation from "./pages/Documentation";
 import ProtocolSim from "./pages/ProtocolSim";
 import NotFound from "./pages/NotFound";
 
@@ -17,6 +18,8 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Index />} />
+          <Route path="/docs" element={<Documentation />} />
+          <Route path="/docs/:page" element={<Documentation />} />
           <Route path="/protocol-sim" element={<ProtocolSim />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

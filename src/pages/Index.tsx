@@ -6,6 +6,7 @@ import { RightToolbar } from '@/components/RightToolbar';
 import { VideoFeedPanel } from '@/components/VideoFeedPanel';
 import { EntityDetailPanel } from '@/components/EntityDetailPanel';
 import { TrackDetailPanel } from '@/components/TrackDetailPanel';
+import { SettingsDialog } from '@/components/SettingsDialog';
 import { Entity } from '@/types/entity';
 import { Track, TrackDisposition } from '@/types/track';
 
@@ -119,6 +120,7 @@ const Index = () => {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [isDetailPanelOpen, setIsDetailPanelOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [scale, setScale] = useState(1);
   const [offlineDrawActive, setOfflineDrawActive] = useState(false);
   const [offlineBBox, setOfflineBBox] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
@@ -248,6 +250,7 @@ const Index = () => {
               onPanelSelect={handlePanelSelect}
               activePanel={activePanel}
               onOpenProtocolSim={handleOpenProtocolSim}
+              onOpenSettings={() => setSettingsOpen(true)}
             />
           </div>
           
@@ -327,6 +330,7 @@ const Index = () => {
           )}
 
         </div>
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       </div>
     </div>
   );

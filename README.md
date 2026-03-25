@@ -133,6 +133,90 @@ Default APC response:
 
 These endpoints are wired for development and will be connected to the real training pipeline and model artifacts.
 
+## Benchmark Pipeline
+
+The backend now includes a manifest-driven benchmark scaffold for the APC matching stack. It is organized to compare:
+
+- `template` for the existing NCC/template baseline
+- `orb` for a classical geometric baseline
+- `superpoint_lightglue` as a local matching extension point
+- `loftr` as a dense local matching extension point
+- `transgeo` as a coarse retrieval baseline interface
+- `transgeo_loftr` as a hybrid retrieval-plus-refinement pipeline
+
+The learned methods are scaffolded as adapters so you can plug in real backends later without changing the benchmark runner. The retrieval baseline currently uses a simple embedding fallback and is marked in the result metadata.
+
+### Benchmark manifest
+
+Use [`app/backend/benchmark/example_manifest.json`](app/backend/benchmark/example_manifest.json) as the template. Each sample includes:
+
+- one drone frame path
+- the ground-truth coordinate
+- a list of satellite candidate tiles with center coordinates
+- optional yaw/altitude metadata for preprocessing
+
+### Run benchmark from CLI
+
+```powershell
+C:\venvs\apc-gcs\Scripts\python.exe -m app.backend.benchmark.cli app\backend\benchmark\example_manifest.json
+```
+
+### Optional ML matcher install
+
+To enable learned local matchers:
+
+```powershell
+# Install PyTorch first using the command for your platform from pytorch.org
+C:\venvs\apc-gcs\Scripts\python.exe -m pip install -r app\backend\requirements-ml.txt
+```
+
+For LightGlue, install the upstream project after PyTorch:
+
+```powershell
+git clone https://github.com/cvg/LightGlue.git
+cd LightGlue
+C:\venvs\apc-gcs\Scripts\python.exe -m pip install -e .
+```
+
+`LoFTR` will activate automatically once `torch` and `kornia` are installed. `SuperPoint + LightGlue` will activate automatically once the upstream `lightglue` package is installed.
+
+### Internal Visual Localization Module
+
+The backend now carries a vendored in-repo copy of the upstream `visual_localization` project under [`app/backend/vendor_visual_localization`](app/backend/vendor_visual_localization). The APC pipeline imports that duplicated source tree directly and runs `SuperPoint + SuperGlue` in-process.
+
+To enable the internal module, install the extra runtime dependencies:
+
+```powershell
+C:\venvs\apc-gcs\Scripts\python.exe -m pip install -r app\backend\requirements-ml.txt
+```
+
+Then configure the following in the frontend APC panel:
+
+- select `Visual Localization` in `Tile Matching Backend`
+- set `Map DB path`
+- save the config
+
+If the vendored module is enabled and ready, APC will try it first during frame matching and fall back to the native matcher if it fails.
+
+### Run benchmark from API
+
+```powershell
+Invoke-RestMethod `
+  -Uri http://localhost:9000/benchmark/run `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body (@{
+    manifest_path = "app/backend/benchmark/example_manifest.json"
+    methods = @("template", "orb", "transgeo", "transgeo_loftr")
+  } | ConvertTo-Json)
+```
+
+### List available benchmark methods
+
+```powershell
+Invoke-RestMethod http://localhost:9000/benchmark/methods
+```
+
 ## Notes
 
 - Coarse matching + EKF are wired; replace `coarse_match.py` with your real model later.
