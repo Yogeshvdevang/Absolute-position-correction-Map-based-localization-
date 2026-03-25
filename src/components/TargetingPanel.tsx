@@ -434,9 +434,8 @@ export const TargetingPanel = () => {
                 return (
                   <button
                     key={model.path}
-                    className={`rounded border px-2 py-2 text-left transition ${
-                      active ? 'border-cyan-400 bg-cyan-500/10' : 'border-white/10 bg-white/5 hover:bg-white/10'
-                    }`}
+                    className={`rounded border px-2 py-2 text-left transition ${active ? 'border-cyan-400 bg-cyan-500/10' : 'border-white/10 bg-white/5 hover:bg-white/10'
+                      }`}
                     onClick={() => void postTrackerAction('select-model', { model_path: model.path })}
                     disabled={trackerBusy}
                   >
@@ -453,15 +452,33 @@ export const TargetingPanel = () => {
                 </div>
               ) : null}
             </div>
+            <div className="mt-3 flex items-center justify-between">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-slate-300">Detection Classes</div>
+              <div className="flex gap-1">
+                <button
+                  className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 transition text-[9px] font-medium text-cyan-300 disabled:opacity-50"
+                  onClick={() => void postTrackerAction('set-classes', { classes: trackerStatus?.selected_model_classes || [] })}
+                  disabled={trackerBusy || !(trackerStatus?.selected_model_classes || []).length}
+                >
+                  Select All
+                </button>
+                <button
+                  className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 transition text-[9px] font-medium text-slate-400 hover:text-slate-300 disabled:opacity-50"
+                  onClick={() => void postTrackerAction('set-classes', { classes: [] })}
+                  disabled={trackerBusy || !(trackerStatus?.selected_model_classes || []).length}
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
             <div className="mt-2 flex flex-wrap gap-1">
               {(trackerStatus?.selected_model_classes || []).map((className) => {
                 const active = (trackerStatus?.enabled_classes || []).includes(className);
                 return (
                   <button
                     key={className}
-                    className={`rounded-full border px-2 py-1 text-[10px] ${
-                      active ? 'border-cyan-300 bg-cyan-500/10 text-cyan-100' : 'border-white/15 text-slate-300'
-                    }`}
+                    className={`rounded-full border px-2 py-1 text-[10px] ${active ? 'border-cyan-300 bg-cyan-500/10 text-cyan-100' : 'border-white/15 text-slate-300'
+                      }`}
                     onClick={() => void postTrackerAction('toggle-class', { class_name: className })}
                     disabled={trackerBusy}
                   >
@@ -527,9 +544,8 @@ export const TargetingPanel = () => {
                 {[0.2, 0.5, 1, 2, 3].map((speed) => (
                   <button
                     key={speed}
-                    className={`rounded border px-2 py-1 text-[10px] ${
-                      Math.abs(speedScale - speed) < 0.01 ? 'border-cyan-300 bg-cyan-500/10 text-cyan-100' : 'border-white/15 text-slate-300'
-                    }`}
+                    className={`rounded border px-2 py-1 text-[10px] ${Math.abs(speedScale - speed) < 0.01 ? 'border-cyan-300 bg-cyan-500/10 text-cyan-100' : 'border-white/15 text-slate-300'
+                      }`}
                     onClick={() => void postTrackerAction('set-camera-speed', { speed_scale: speed })}
                     disabled={trackerBusy}
                   >

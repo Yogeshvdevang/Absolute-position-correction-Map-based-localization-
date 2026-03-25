@@ -139,6 +139,10 @@ class IconTrackerClassRequest(BaseModel):
   class_name: str
 
 
+class IconTrackerBatchClassRequest(BaseModel):
+  classes: List[str]
+
+
 class IconTrackerMoveRequest(BaseModel):
   yaw: int = 0
   pitch: int = 0
@@ -1195,6 +1199,15 @@ async def icon_tracker_toggle_class(req: IconTrackerClassRequest):
   result = await _icon_tracker_proxy("/api/toggle-class", {"class_name": req.class_name}, timeout_seconds=2.0)
   if _is_tracker_error_response(result):
     result = icon_tracker_fallback.toggle_class(req.class_name)
+  _invalidate_icon_tracker_status_cache()
+  return result
+
+
+@app.post("/integrations/icon-tracker/set-classes")
+async def icon_tracker_set_classes(req: IconTrackerBatchClassRequest):
+  result = await _icon_tracker_proxy("/api/set-classes", {"classes": req.classes}, timeout_seconds=2.0)
+  if _is_tracker_error_response(result):
+    result = icon_tracker_fallback.set_classes(req.classes)
   _invalidate_icon_tracker_status_cache()
   return result
 

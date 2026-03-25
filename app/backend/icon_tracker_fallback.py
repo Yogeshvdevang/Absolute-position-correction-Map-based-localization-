@@ -853,6 +853,13 @@ class IconTrackerFallbackService:
       self.status_text = f"Enabled filtering for '{normalized}'"
     return self.status_payload()
 
+  def set_classes(self, classes: List[str]) -> Dict[str, Any]:
+    self.ensure_started()
+    self.enabled_classes = set(classes)
+    self.status_text = f"Updated filtered classes: {len(self.enabled_classes)} enabled"
+    return self.status_payload()
+
+
   def select_target(self, track_id: int) -> Dict[str, Any]:
     self.ensure_started()
     chosen = None
