@@ -2,6 +2,16 @@
 
 This project provides a comprehensive Ground Control Station (GCS) for absolute position correction (APC) using live SIYI camera feeds and satellite map alignment.
 
+## Quick Setup Files
+
+For sharing and installing on another system, use:
+
+- `install.ps1` - one-command Windows installer for backend and frontend dependencies
+- `INSTALL.md` - complete setup/run instructions
+- `DEPENDENCIES.md` - dependency summary and source files
+- `package-lock.json` - exact frontend lockfile
+- `requirements.txt` - backend Python dependency list
+
 ## Implementation Overview
 
 - **Frontend**: React-based UI for mission planning, targeting, and diagnostics.

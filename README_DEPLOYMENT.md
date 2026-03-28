@@ -2,6 +2,12 @@
 
 This project uses a React frontend and a FastAPI backend designed for real-time SIYI camera tracking and absolute position correction (APC). To implement this project on another device (e.g., a server, a dedicated controller, or a different laptop), follow these steps.
 
+## Related Setup Files
+
+- `install.ps1` for one-command Windows installation
+- `INSTALL.md` for concise installation and run commands
+- `DEPENDENCIES.md` for current dependency listing
+
 ## System Requirements
 
 - **Python**: 3.10 to 3.12 (Check with `python --version`)
