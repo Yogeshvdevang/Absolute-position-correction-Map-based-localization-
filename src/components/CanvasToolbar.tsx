@@ -1,4 +1,4 @@
-import { MapPin, Ruler, Search, Map, Layers, Globe, Satellite, Waypoints, Square, Circle, Pen, Triangle, Crosshair, Activity, Route, Undo2, Trash2 } from 'lucide-react';
+import { MapPin, Ruler, Search, Map, Layers, Globe, Satellite, Waypoints, Square, Circle, Pen, Triangle, Crosshair, Activity, Route, Undo2, Trash2, House, Copy } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -96,6 +96,9 @@ interface CanvasToolbarProps {
   onTogglePlanning: () => void;
   onClearMission: () => void;
   onUndoWaypoint: () => void;
+  onAddMarker?: () => void;
+  onSetHomeLocation?: () => void;
+  onCopyLatLong?: () => void;
   onCommand?: (cmd: 'arm' | 'takeoff' | 'land' | 'rtl' | 'mode', params?: Record<string, any>) => void;
   vehicleDomain?: VehicleDomain;
   selectedVehicle?: string | null;
@@ -119,6 +122,9 @@ export const CanvasToolbar = ({
   onTogglePlanning,
   onClearMission,
   onUndoWaypoint,
+  onAddMarker,
+  onSetHomeLocation,
+  onCopyLatLong,
   onCommand,
   vehicleDomain = 'air',
   selectedVehicle = null,
@@ -192,10 +198,19 @@ export const CanvasToolbar = ({
           <DropdownMenuContent align="start" className="w-48 bg-panel border-border">
             <DropdownMenuLabel className="text-xs text-muted-foreground">Map Annotations</DropdownMenuLabel>
             <DropdownMenuSeparator className="bg-border" />
-            <DropdownMenuItem className="hover:bg-secondary cursor-pointer">
+            <DropdownMenuItem className="hover:bg-secondary cursor-pointer" onClick={onAddMarker}>
               <MapPin className="mr-2 h-4 w-4" />
               <span>Add Marker</span>
             </DropdownMenuItem>
+            <DropdownMenuItem className="hover:bg-secondary cursor-pointer" onClick={onSetHomeLocation}>
+              <House className="mr-2 h-4 w-4" />
+              <span>Set Home Location</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className="hover:bg-secondary cursor-pointer" onClick={onCopyLatLong}>
+              <Copy className="mr-2 h-4 w-4" />
+              <span>Copy Lat/Long</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-border" />
             <DropdownMenuItem className="hover:bg-secondary cursor-pointer">
               <Waypoints className="mr-2 h-4 w-4" />
               <span>Add Waypoint</span>

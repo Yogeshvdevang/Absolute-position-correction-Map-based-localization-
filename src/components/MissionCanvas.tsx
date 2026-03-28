@@ -158,6 +158,9 @@ export const MissionCanvas = ({
   const [showCameraMain, setShowCameraMain] = useState(false);
   const [mapBearing, setMapBearing] = useState(0);
   const [mainFeed, setMainFeed] = useState<'primary' | 'aux'>('primary');
+  const [mapMarkers, setMapMarkers] = useState<LatLonPoint[]>([]);
+  const [homeLocation, setHomeLocation] = useState<LatLonPoint | null>(null);
+  const [homePlacementMode, setHomePlacementMode] = useState(false);
   const loadingPlannerRef = useRef(false);
 
   // Use mock entities if not connected, otherwise use live entities
@@ -238,6 +241,73 @@ export const MissionCanvas = ({
   const handleLocationSearch = (query: string) => {
     mapRef.current?.searchLocation(query);
   };
+
+  const getReferencePoint = (): LatLonPoint | null => {
+    return mapRef.current?.getReferencePoint() ?? null;
+  };
+
+  const handleAddMarker = () => {
+    const point = getReferencePoint();
+    if (!point) {
+      toast({ title: 'No map point available', description: 'Move cursor over the map and try again.' });
+      return;
+    }
+    setMapMarkers(prev => [...prev, point]);
+    toast({
+      title: 'Marker added',
+      description: `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`
+    });
+  };
+
+  const handleSetHomeLocation = () => {
+    setHomePlacementMode(true);
+    toast({
+      title: 'Home placement active',
+      description: 'Move cursor on map, then press Enter to confirm home. Press Esc to cancel.'
+    });
+  };
+
+  const handleCopyLatLong = async () => {
+    const point = getReferencePoint();
+    if (!point) {
+      toast({ title: 'No map point available', description: 'Move cursor over the map and try again.' });
+      return;
+    }
+    const value = `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast({ title: 'Coordinates copied', description: value });
+    } catch {
+      toast({ title: 'Copy failed', description: value, variant: 'destructive' });
+    }
+  };
+
+  useEffect(() => {
+    if (!homePlacementMode) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setHomePlacementMode(false);
+        toast({ title: 'Home placement cancelled' });
+        return;
+      }
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      const point = getReferencePoint();
+      if (!point) {
+        toast({ title: 'No map point available', description: 'Move cursor over the map and try again.' });
+        return;
+      }
+      setHomeLocation(point);
+      setHomePlacementMode(false);
+      toast({
+        title: 'Home location confirmed',
+        description: `${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`
+      });
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [homePlacementMode]);
 
   const issueCommand = async (cmd: 'arm' | 'takeoff' | 'land' | 'rtl' | 'mode', params?: Record<string, any>) => {
     try {
@@ -928,6 +998,9 @@ export const MissionCanvas = ({
             }}
             onClearMission={clearMission}
             onUndoWaypoint={undoWaypoint}
+            onAddMarker={handleAddMarker}
+            onSetHomeLocation={handleSetHomeLocation}
+            onCopyLatLong={handleCopyLatLong}
             onCommand={issueCommand}
             selectedVehicle={selectedEntity}
             vehicleDomain={vehicleDomain}
@@ -997,6 +1070,9 @@ export const MissionCanvas = ({
             surveyBoundaryPoints={surveyEditMode ? surveyBoundaryPoints : []}
             onSurveyBoundaryChange={handleSurveyBoundaryChange}
             surveyPatternType={surveyConfig.patternType}
+            annotationMarkers={mapMarkers}
+            homeLocation={homeLocation}
+            homePlacementMode={homePlacementMode}
             showInternationalBorders={showInternationalBorders}
             showLineOfControl={showLineOfControl}
             showIndianClaimedBorder={showIndianClaimedBorder}

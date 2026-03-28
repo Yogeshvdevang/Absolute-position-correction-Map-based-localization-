@@ -103,6 +103,7 @@ export interface MapViewRef {
   searchLocation: (query: string) => Promise<void>;
   flyTo: (lng: number, lat: number, zoom?: number) => void;
   getSnapshot: () => string | null;
+  getReferencePoint: () => { lat: number; lon: number } | null;
 }
 
 interface MapViewProps {
@@ -123,6 +124,9 @@ interface MapViewProps {
   surveyBoundaryPoints?: LatLonPoint[];
   onSurveyBoundaryChange?: (points: LatLonPoint[]) => void;
   surveyPatternType?: 'grid' | 'corridor' | 'circle';
+  annotationMarkers?: LatLonPoint[];
+  homeLocation?: LatLonPoint | null;
+  homePlacementMode?: boolean;
   showInternationalBorders?: boolean;
   showLineOfControl?: boolean;
   showIndianClaimedBorder?: boolean;
@@ -152,6 +156,9 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   surveyBoundaryPoints = [],
   onSurveyBoundaryChange,
   surveyPatternType = 'grid',
+  annotationMarkers = [],
+  homeLocation = null,
+  homePlacementMode = false,
   showInternationalBorders = true,
   showLineOfControl = true,
   showIndianClaimedBorder = true,
@@ -173,11 +180,13 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   const surveyEditEnabledRef = useRef(surveyEditEnabled);
   const surveyPatternTypeRef = useRef(surveyPatternType);
   const surveyPopupRef = useRef<maplibregl.Popup | null>(null);
+  const homePopupRef = useRef<maplibregl.Popup | null>(null);
   const ensureOverlayRef = useRef<null | (() => void)>(null);
   const syncOverlayDataRef = useRef<null | (() => void)>(null);
   const [basemapError, setBasemapError] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [cursorCoords, setCursorCoords] = useState<{ lat: number; lon: number } | null>(null);
+  const cursorCoordsRef = useRef<{ lat: number; lon: number } | null>(null);
   const [bearing, setBearing] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_ZOOM);
   const [pitch, setPitch] = useState(0);
@@ -225,6 +234,12 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       } catch {
         return null;
       }
+    },
+    getReferencePoint: () => {
+      if (cursorCoordsRef.current) return cursorCoordsRef.current;
+      if (!mapRef.current) return null;
+      const center = mapRef.current.getCenter();
+      return { lat: center.lat, lon: center.lng };
     }
   }));
   const computeInitialCenter = (): [number, number] => {
@@ -279,6 +294,35 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       };
     })
   }), [missionWaypoints]);
+  const annotationMarkersGeoJson = useMemo<GeoJSON.FeatureCollection>(() => ({
+    type: 'FeatureCollection',
+    features: annotationMarkers.map((point, idx) => ({
+      type: 'Feature',
+      geometry: {
+        type: 'Point',
+        coordinates: [point.lon, point.lat]
+      },
+      properties: {
+        id: `marker-${idx + 1}`,
+        order: idx + 1
+      }
+    }))
+  }), [annotationMarkers]);
+  const effectiveHomeLocation = homePlacementMode ? (cursorCoords ?? homeLocation) : homeLocation;
+  const homeLocationGeoJson = useMemo<GeoJSON.FeatureCollection>(() => ({
+    type: 'FeatureCollection',
+    features: effectiveHomeLocation ? [{
+      type: 'Feature',
+      geometry: {
+        type: 'Point',
+        coordinates: [effectiveHomeLocation.lon, effectiveHomeLocation.lat]
+      },
+      properties: {
+        label: homePlacementMode ? 'HOME (Preview)' : 'HOME',
+        preview: homePlacementMode ? 1 : 0
+      }
+    }] : []
+  }), [effectiveHomeLocation, homePlacementMode]);
   const waypointColumnsGeoJson = useMemo<GeoJSON.FeatureCollection>(() => {
     const metersToLngLat = (lat: number, meters: number) => {
       const latRad = (lat * Math.PI) / 180;
@@ -545,6 +589,8 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   const initialCenterRef = useRef<[number, number]>(computeInitialCenter());
   const entitiesGeoJsonRef = useRef(entitiesGeoJson);
   const missionWaypointsGeoJsonRef = useRef(missionWaypointsGeoJson);
+  const annotationMarkersGeoJsonRef = useRef(annotationMarkersGeoJson);
+  const homeLocationGeoJsonRef = useRef(homeLocationGeoJson);
   const waypointColumnsGeoJsonRef = useRef(waypointColumnsGeoJson);
   const missionPathRef = useRef(missionPath);
   const missionPathPipesGeoJsonRef = useRef(missionPathPipesGeoJson);
@@ -563,6 +609,12 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
   useEffect(() => {
     missionWaypointsGeoJsonRef.current = missionWaypointsGeoJson;
   }, [missionWaypointsGeoJson]);
+  useEffect(() => {
+    annotationMarkersGeoJsonRef.current = annotationMarkersGeoJson;
+  }, [annotationMarkersGeoJson]);
+  useEffect(() => {
+    homeLocationGeoJsonRef.current = homeLocationGeoJson;
+  }, [homeLocationGeoJson]);
   useEffect(() => {
     waypointColumnsGeoJsonRef.current = waypointColumnsGeoJson;
   }, [waypointColumnsGeoJson]);
@@ -664,9 +716,12 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       setScaleWidth(Math.max(24, Math.min(chosenWidth, maxWidth)));
     };
     const handleMouseMove = (e: maplibregl.MapMouseEvent) => {
-      setCursorCoords({ lat: e.lngLat.lat, lon: e.lngLat.lng });
+      const next = { lat: e.lngLat.lat, lon: e.lngLat.lng };
+      cursorCoordsRef.current = next;
+      setCursorCoords(next);
     };
     const handleMouseLeave = () => {
+      cursorCoordsRef.current = null;
       setCursorCoords(null);
     };
     setBearing(map.getBearing());
@@ -884,6 +939,82 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
             'line-opacity': 1
           }
         }, firstSymbolId);
+      }
+
+      if (!map.getSource('annotation-markers')) {
+        map.addSource('annotation-markers', {
+          type: 'geojson',
+          data: annotationMarkersGeoJsonRef.current
+        });
+      }
+      if (!map.getLayer('annotation-markers-circle')) {
+        map.addLayer({
+          id: 'annotation-markers-circle',
+          type: 'circle',
+          source: 'annotation-markers',
+          paint: {
+            'circle-color': '#38bdf8',
+            'circle-stroke-color': '#0b1220',
+            'circle-stroke-width': 1.5,
+            'circle-radius': 5
+          }
+        });
+      }
+      if (!map.getLayer('annotation-markers-label')) {
+        map.addLayer({
+          id: 'annotation-markers-label',
+          type: 'symbol',
+          source: 'annotation-markers',
+          layout: {
+            'text-field': ['concat', 'M', ['to-string', ['get', 'order']]],
+            'text-size': 10,
+            'text-offset': [0, 1.1],
+            'text-anchor': 'top'
+          },
+          paint: {
+            'text-color': '#e2e8f0',
+            'text-halo-color': '#0b1220',
+            'text-halo-width': 1
+          }
+        });
+      }
+      if (!map.getSource('home-location')) {
+        map.addSource('home-location', {
+          type: 'geojson',
+          data: homeLocationGeoJsonRef.current
+        });
+      }
+      if (!map.getLayer('home-location-circle')) {
+        map.addLayer({
+          id: 'home-location-circle',
+          type: 'circle',
+          source: 'home-location',
+          paint: {
+            'circle-color': ['case', ['==', ['get', 'preview'], 1], '#f97316', '#ef4444'],
+            'circle-opacity': ['case', ['==', ['get', 'preview'], 1], 0.75, 1],
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 2,
+            'circle-radius': 7
+          }
+        });
+      }
+      if (!map.getLayer('home-location-label')) {
+        map.addLayer({
+          id: 'home-location-label',
+          type: 'symbol',
+          source: 'home-location',
+          layout: {
+            'text-field': ['get', 'label'],
+            'text-size': 10,
+            'text-offset': [0, 1.3],
+            'text-anchor': 'top'
+          },
+          paint: {
+            'text-color': '#ffffff',
+            'text-halo-color': '#0b1220',
+            'text-halo-width': 1.2
+          }
+        });
       }
 
       // Mission planning overlays
@@ -1216,6 +1347,10 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     const syncOverlayData = () => {
       const entitiesSrc = map.getSource('entities') as GeoJSONSource | undefined;
       if (entitiesSrc) entitiesSrc.setData(entitiesGeoJsonRef.current);
+      const markerSrc = map.getSource('annotation-markers') as GeoJSONSource | undefined;
+      if (markerSrc) markerSrc.setData(annotationMarkersGeoJsonRef.current);
+      const homeSrc = map.getSource('home-location') as GeoJSONSource | undefined;
+      if (homeSrc) homeSrc.setData(homeLocationGeoJsonRef.current);
       const waypointSrc = map.getSource('mission-waypoints') as GeoJSONSource | undefined;
       if (waypointSrc) waypointSrc.setData(missionWaypointsGeoJsonRef.current);
       const pathSrc = map.getSource('mission-path') as GeoJSONSource | undefined;
@@ -1492,6 +1627,8 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       map.off('click', handleBBoxClick);
       map.off('mousemove', handleBBoxMove);
       map.getCanvas().removeEventListener('mouseleave', handleMouseLeave);
+      homePopupRef.current?.remove();
+      homePopupRef.current = null;
       map.remove();
       mapRef.current = null;
     };
@@ -1574,6 +1711,15 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     const src = map.getSource('entities') as GeoJSONSource | undefined;
     if (src) src.setData(entitiesGeoJson);
   }, [entitiesGeoJson]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const markerSrc = map.getSource('annotation-markers') as GeoJSONSource | undefined;
+    const homeSrc = map.getSource('home-location') as GeoJSONSource | undefined;
+    if (markerSrc) markerSrc.setData(annotationMarkersGeoJson);
+    if (homeSrc) homeSrc.setData(homeLocationGeoJson);
+  }, [annotationMarkersGeoJson, homeLocationGeoJson]);
 
   // sync mission planning overlays
   useEffect(() => {
@@ -1722,6 +1868,133 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
       map.off('click', 'mission-waypoints-circle', handleWaypointClick);
     };
   }, [missionWaypoints, onWaypointClick]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !homeLocation) return;
+    if (!map.getLayer('home-location-circle')) return;
+
+    const popup = homePopupRef.current ?? new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: true,
+      offset: 12,
+      className: 'home-copy-popup'
+    });
+    homePopupRef.current = popup;
+
+    const createCopyButton = (label: string, value: string) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.style.border = '1px solid rgba(148, 163, 184, 0.45)';
+      button.style.borderRadius = '6px';
+      button.style.padding = '4px 8px';
+      button.style.fontSize = '11px';
+      button.style.lineHeight = '1';
+      button.style.fontWeight = '600';
+      button.style.color = '#e2e8f0';
+      button.style.background = 'rgba(15, 23, 42, 0.65)';
+      button.style.cursor = 'pointer';
+      button.addEventListener('click', async (event) => {
+        event.preventDefault();
+        const baseLabel = label;
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = 'Copied';
+        } catch {
+          button.textContent = 'Failed';
+        }
+        setTimeout(() => {
+          button.textContent = baseLabel;
+        }, 900);
+      });
+      return button;
+    };
+
+    const handleHomeClick = (event: maplibregl.MapLayerMouseEvent) => {
+      const feature = event.features?.[0];
+      const geometry = feature?.geometry;
+      if (!geometry || geometry.type !== 'Point') return;
+      const coordinates = geometry.coordinates as [number, number];
+      const lon = coordinates[0];
+      const lat = coordinates[1];
+      const latValue = lat.toFixed(6);
+      const lonValue = lon.toFixed(6);
+
+      const container = document.createElement('div');
+      container.style.minWidth = '240px';
+      container.style.display = 'flex';
+      container.style.flexDirection = 'column';
+      container.style.gap = '10px';
+      container.style.color = '#f8fafc';
+      container.style.fontFamily = 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+
+      const title = document.createElement('div');
+      title.style.fontSize = '12px';
+      title.style.fontWeight = '700';
+      title.style.letterSpacing = '0.02em';
+      title.textContent = 'Home Location';
+
+      const createCoordinateRow = (name: string, value: string, copyLabel: string) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.justifyContent = 'space-between';
+        row.style.gap = '8px';
+
+        const left = document.createElement('div');
+        left.style.display = 'flex';
+        left.style.flexDirection = 'column';
+        left.style.gap = '2px';
+
+        const label = document.createElement('div');
+        label.style.fontSize = '10px';
+        label.style.textTransform = 'uppercase';
+        label.style.letterSpacing = '0.07em';
+        label.style.color = '#94a3b8';
+        label.textContent = name;
+
+        const number = document.createElement('div');
+        number.style.fontSize = '13px';
+        number.style.fontWeight = '600';
+        number.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace';
+        number.textContent = value;
+
+        left.appendChild(label);
+        left.appendChild(number);
+        row.appendChild(left);
+        row.appendChild(createCopyButton(copyLabel, value));
+        return row;
+      };
+
+      container.appendChild(title);
+      container.appendChild(createCoordinateRow('Latitude', latValue, 'Copy Lat'));
+      container.appendChild(createCoordinateRow('Longitude', lonValue, 'Copy Lon'));
+
+      popup.setDOMContent(container).setLngLat([lon, lat]).addTo(map);
+      const popupElement = popup.getElement();
+      const content = popupElement.querySelector('.maplibregl-popup-content') as HTMLElement | null;
+      if (content) {
+        content.style.background = 'rgba(2, 6, 23, 0.95)';
+        content.style.border = '1px solid rgba(148, 163, 184, 0.4)';
+        content.style.borderRadius = '10px';
+        content.style.boxShadow = '0 10px 30px rgba(2, 6, 23, 0.45)';
+        content.style.padding = '10px';
+      }
+      const tip = popupElement.querySelector('.maplibregl-popup-tip') as HTMLElement | null;
+      if (tip) {
+        tip.style.borderTopColor = 'rgba(2, 6, 23, 0.95)';
+        tip.style.borderBottomColor = 'rgba(2, 6, 23, 0.95)';
+        tip.style.borderLeftColor = 'rgba(2, 6, 23, 0.95)';
+        tip.style.borderRightColor = 'rgba(2, 6, 23, 0.95)';
+      }
+    };
+
+    map.on('click', 'home-location-circle', handleHomeClick);
+    return () => {
+      map.off('click', 'home-location-circle', handleHomeClick);
+    };
+  }, [homeLocation, mapReady, mapStyle]);
 
   const handleToggle3d = () => {
     const map = mapRef.current;
