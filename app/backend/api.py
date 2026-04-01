@@ -11,12 +11,13 @@ import uvicorn
 import websockets
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from .models import VehicleState, MissionPlan, MissionItem
@@ -34,12 +35,16 @@ from .benchmark.interfaces import BenchmarkRequest
 from .vendor_visual_localization.service import VisualLocalizationConfig, VisualLocalizationService
 from .icon_tracker_process import ManagedIconTrackerProcess
 from .icon_tracker_fallback import IconTrackerFallbackService
+from .navisar_process import ManagedNavisarProcess
 
 # Configuration
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://localhost:8000")
 BRIDGE_WS = os.getenv("BRIDGE_WS", "ws://localhost:8000/ws")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "vehicle-1")
 ICON_TRACKER_BASE = os.getenv("ICON_TRACKER_BASE", "http://127.0.0.1:8090").rstrip("/")
+NAVISAR_BASE = os.getenv("NAVISAR_BASE", "http://127.0.0.1:8765").rstrip("/")
+NAVISAR_ROOT = Path(os.getenv("NAVISAR_ROOT", "/home/yogesh/Documents/navsar-a-pi5"))
+NAVISAR_AUTOSTART = os.getenv("NAVISAR_AUTOSTART", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Vehicle(BaseModel):
@@ -246,6 +251,11 @@ icon_tracker_fallback = IconTrackerFallbackService(
   camera_ip=ICON_TRACKER_CAMERA_IP,
   camera_port=ICON_TRACKER_CAMERA_PORT,
   rtsp_url=ICON_TRACKER_RTSP_URL,
+)
+navisar_process = ManagedNavisarProcess(
+  navisar_root=NAVISAR_ROOT,
+  base_url=NAVISAR_BASE,
+  enabled=NAVISAR_AUTOSTART,
 )
 ICON_TRACKER_STATUS_CACHE_TTL_SECONDS = float(os.getenv("ICON_TRACKER_STATUS_CACHE_TTL_SECONDS", "0.35"))
 icon_tracker_status_cache: Dict[str, Any] = {"ts": 0.0, "payload": None}
@@ -629,6 +639,10 @@ async def shutdown_event():
     pass
   try:
     icon_tracker_fallback.shutdown()
+  except Exception:
+    pass
+  try:
+    navisar_process.shutdown()
   except Exception:
     pass
 
@@ -1152,6 +1166,86 @@ async def _external_stream_generator(stream_url: str):
     yield f"--frame\r\nContent-Type: text/plain\r\n\r\n{message}\r\n".encode("utf-8")
 
 
+async def _navisar_proxy(method: str, path: str, query_string: str = "", body: bytes = b"") -> Response:
+  is_dashboard_html = method.upper() == "GET" and (path.strip("/") in {"", "gui.html"})
+  startup_wait = 25.0 if is_dashboard_html else 6.0
+  await asyncio.to_thread(navisar_process.ensure_running, startup_wait)
+  target_path = path.lstrip("/")
+  upstream_url = f"{NAVISAR_BASE}/{target_path}" if target_path else f"{NAVISAR_BASE}/"
+  if query_string:
+    upstream_url = f"{upstream_url}?{query_string}"
+
+  timeout = httpx.Timeout(connect=3.0, read=15.0, write=10.0, pool=10.0)
+  try:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+      upstream = await client.request(
+        method=method,
+        url=upstream_url,
+        content=body if body else None,
+        headers={"Accept": "*/*"},
+      )
+  except Exception as exc:
+    if is_dashboard_html:
+      html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>NAVISAR Starting</title></head>
+<body style="background:#0b0f14;color:#dbe7ff;font-family:system-ui;padding:24px">
+<h3>NAVISAR is starting...</h3>
+<p>Backend tried to reach <code>{NAVISAR_BASE}</code> but it is not ready yet.</p>
+<p>Auto-retrying every 3 seconds.</p>
+<pre style="background:#111827;padding:12px;border-radius:8px;white-space:pre-wrap">{exc}</pre>
+</body></html>"""
+      return Response(content=html, media_type="text/html", status_code=503)
+    return JSONResponse(
+      status_code=502,
+      content={
+        "error": "navisar_unavailable",
+        "message": f"NAVISAR is not reachable at {NAVISAR_BASE}: {exc}",
+      },
+    )
+
+  content_type = upstream.headers.get("content-type", "application/octet-stream")
+  passthrough_headers = {}
+  cache_control = upstream.headers.get("cache-control")
+  if cache_control:
+    passthrough_headers["Cache-Control"] = cache_control
+
+  return Response(
+    content=upstream.content,
+    status_code=upstream.status_code,
+    media_type=content_type,
+    headers=passthrough_headers,
+  )
+
+
+async def _navisar_upstream_status() -> Dict[str, Any]:
+  await asyncio.to_thread(navisar_process.ensure_running, 1.8)
+  timeout = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
+  probe_url = f"{NAVISAR_BASE}/data"
+  try:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+      resp = await client.get(probe_url, headers={"Accept": "application/json"})
+    return {
+      "available": resp.status_code < 400,
+      "status_code": resp.status_code,
+      "base_url": NAVISAR_BASE,
+      "probe_url": probe_url,
+      "navisar_root": str(NAVISAR_ROOT),
+      "autostart": NAVISAR_AUTOSTART,
+      "integration_log": str((NAVISAR_ROOT / "navisar-integration.log").resolve()),
+    }
+  except Exception as exc:
+    return {
+      "available": False,
+      "status_code": None,
+      "base_url": NAVISAR_BASE,
+      "probe_url": probe_url,
+      "navisar_root": str(NAVISAR_ROOT),
+      "autostart": NAVISAR_AUTOSTART,
+      "integration_log": str((NAVISAR_ROOT / "navisar-integration.log").resolve()),
+      "error": str(exc),
+    }
+
+
 @app.get("/integrations/icon-tracker/status")
 async def icon_tracker_status():
   now = asyncio.get_running_loop().time()
@@ -1287,6 +1381,31 @@ async def icon_tracker_stream():
     _fallback_mjpeg_generator(),
     media_type="multipart/x-mixed-replace; boundary=frame",
   )
+
+
+@app.api_route("/integrations/navisar", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def navisar_proxy_root(request: Request):
+  body = await request.body()
+  return await _navisar_proxy(request.method, "", request.url.query, body)
+
+
+@app.get("/integrations/navisar/status")
+async def navisar_status():
+  return await _navisar_upstream_status()
+
+
+@app.post("/integrations/navisar/start")
+async def navisar_start():
+  started = await asyncio.to_thread(navisar_process.ensure_running, 4.0)
+  status = await _navisar_upstream_status()
+  status["started"] = bool(started)
+  return status
+
+
+@app.api_route("/integrations/navisar/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def navisar_proxy_path(path: str, request: Request):
+  body = await request.body()
+  return await _navisar_proxy(request.method, path, request.url.query, body)
 
 
 @app.get("/integrations/visual-localization")

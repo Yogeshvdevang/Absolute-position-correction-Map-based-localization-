@@ -1,4 +1,4 @@
-import { Crosshair, Eye, Globe, Layers, PlaneTakeoff, Settings, SlidersHorizontal, TerminalSquare } from 'lucide-react';
+import { Crosshair, Eye, Globe, Layers, PlaneTakeoff, Radar, Settings, SlidersHorizontal, TerminalSquare } from 'lucide-react';
 import { Button } from './ui/button';
 
 interface VerticalAppBarProps {
@@ -73,6 +73,16 @@ export const VerticalAppBar = ({ onBack, onPanelSelect, activePanel, onOpenProto
         onClick={() => onPanelSelect('targeting')}
       >
         <Crosshair className="h-5 w-5" />
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="sm"
+        className={getButtonClass('navisar')}
+        onClick={() => onPanelSelect('navisar')}
+        title="NAVISAR Dashboard"
+      >
+        <Radar className="h-5 w-5" />
       </Button>
 
       <div className="flex-1" />

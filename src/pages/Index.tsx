@@ -7,6 +7,7 @@ import { VideoFeedPanel } from '@/components/VideoFeedPanel';
 import { EntityDetailPanel } from '@/components/EntityDetailPanel';
 import { TrackDetailPanel } from '@/components/TrackDetailPanel';
 import { SettingsDialog } from '@/components/SettingsDialog';
+import { NavisarDashboardPanel } from '@/components/NavisarDashboardPanel';
 import { Entity } from '@/types/entity';
 import { Track, TrackDisposition } from '@/types/track';
 
@@ -230,7 +231,8 @@ const Index = () => {
     window.open('/protocol-sim', '_blank', 'noopener,noreferrer');
   };
 
-  const showLeftPanel = Boolean(activePanel);
+  const isNavisarPanel = activePanel === 'navisar';
+  const showLeftPanel = Boolean(activePanel) && !isNavisarPanel;
 
   return (
     <div 
@@ -279,26 +281,32 @@ const Index = () => {
           )}
           
           <div className="flex-1 flex flex-col min-w-0">
-            <div className="flex-1 min-h-0">
-              <MissionCanvas 
-                selectedEntity={selectedEntity}
-                onEntitySelect={handleEntitySelect}
-                onEntitiesUpdate={setEntities}
-                offlineDrawActive={offlineDrawActive}
-                offlineBBox={offlineBBox}
-                onOfflineBBoxChange={setOfflineBBox}
-                onOfflineDrawActiveChange={setOfflineDrawActive}
-                onMapZoomChange={setMapZoom}
-                budgetBBox={budgetBBox}
-                onRegisterSnapshot={(fn) => {
-                  snapshotGetterRef.current = fn;
-                }}
-              />
-            </div>
-            {isVideoFeedOpen && <VideoFeedPanel />}
+            {isNavisarPanel ? (
+              <NavisarDashboardPanel />
+            ) : (
+              <>
+                <div className="flex-1 min-h-0">
+                  <MissionCanvas
+                    selectedEntity={selectedEntity}
+                    onEntitySelect={handleEntitySelect}
+                    onEntitiesUpdate={setEntities}
+                    offlineDrawActive={offlineDrawActive}
+                    offlineBBox={offlineBBox}
+                    onOfflineBBoxChange={setOfflineBBox}
+                    onOfflineDrawActiveChange={setOfflineDrawActive}
+                    onMapZoomChange={setMapZoom}
+                    budgetBBox={budgetBBox}
+                    onRegisterSnapshot={(fn) => {
+                      snapshotGetterRef.current = fn;
+                    }}
+                  />
+                </div>
+                {isVideoFeedOpen && <VideoFeedPanel />}
+              </>
+            )}
           </div>
           
-          {(isDetailPanelOpen || selectedTrack) && (
+          {!isNavisarPanel && (isDetailPanelOpen || selectedTrack) && (
             <>
               <div className="w-80 flex-shrink-0">
                 {selectedTrack ? (
