@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -43,7 +44,9 @@ BRIDGE_WS = os.getenv("BRIDGE_WS", "ws://localhost:8000/ws")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "vehicle-1")
 ICON_TRACKER_BASE = os.getenv("ICON_TRACKER_BASE", "http://127.0.0.1:8090").rstrip("/")
 NAVISAR_BASE = os.getenv("NAVISAR_BASE", "http://127.0.0.1:8765").rstrip("/")
-NAVISAR_ROOT = Path(os.getenv("NAVISAR_ROOT", "/home/yogesh/Documents/navsar-a-pi5"))
+NAVISAR_ROOT = Path(
+  os.getenv("NAVISAR_ROOT", str(Path(__file__).resolve().parents[2] / "external" / "navisar-a-pi5"))
+)
 NAVISAR_AUTOSTART = os.getenv("NAVISAR_AUTOSTART", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -1209,8 +1212,22 @@ async def _navisar_proxy(method: str, path: str, query_string: str = "", body: b
   if cache_control:
     passthrough_headers["Cache-Control"] = cache_control
 
+  content = upstream.content
+  if method.upper() == "GET" and "text/html" in content_type.lower():
+    try:
+      html = content.decode("utf-8")
+      proxy_prefix = "/integrations/navisar"
+      html = re.sub(r'(?P<attr>\b(?:src|href|action)=["\'])/(?!/)', rf'\g<attr>{proxy_prefix}/', html)
+      html = re.sub(r'fetch\(\s*"/(?!/)', f'fetch("{proxy_prefix}/', html)
+      html = re.sub(r"fetch\(\s*'/(?!/)", f"fetch('{proxy_prefix}/", html)
+      html = re.sub(r'window\.location\.href\s*=\s*"/(?!/)', f'window.location.href = "{proxy_prefix}/', html)
+      html = re.sub(r"window\.location\.href\s*=\s*'/(?!/)", f"window.location.href = '{proxy_prefix}/", html)
+      content = html.encode("utf-8")
+    except UnicodeDecodeError:
+      content = upstream.content
+
   return Response(
-    content=upstream.content,
+    content=content,
     status_code=upstream.status_code,
     media_type=content_type,
     headers=passthrough_headers,

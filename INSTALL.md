@@ -64,7 +64,7 @@ The app now includes a dedicated `navisar` section in the left vertical toolbar 
 
 To use it:
 
-1. Start NAVISAR from `/home/yogesh/Documents/navsar-a-pi5` so its web dashboard is running.
+1. Start the bundled NAVISAR project from `external/navisar-a-pi5` so its web dashboard is running.
 2. Open the new `navisar` section in this app.
 
 Default embedded URL:
@@ -83,7 +83,7 @@ Backend env override (optional):
 
 ```text
 NAVISAR_BASE=http://127.0.0.1:8765
-NAVISAR_ROOT=/home/yogesh/Documents/navsar-a-pi5
+NAVISAR_ROOT=/path/to/repo/external/navisar-a-pi5
 NAVISAR_AUTOSTART=1
 ```
 

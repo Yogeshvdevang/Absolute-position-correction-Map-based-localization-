@@ -1,0 +1,10 @@
+{
+  "calibration_duration_s": 15.0,
+  "calibration_margin": 1.35,
+  "imu_motion_threshold_mps": 0.3024181191001216,
+  "imu_noise_max_mps": 0.22401342155564563,
+  "sample_count": 77,
+  "saved_at_unix_s": 1775548790.4881537,
+  "vo_motion_threshold_mps": 0.01,
+  "vo_noise_max_mps": 0.00028253069988179474
+}

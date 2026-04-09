@@ -8,6 +8,7 @@ import { EntityDetailPanel } from '@/components/EntityDetailPanel';
 import { TrackDetailPanel } from '@/components/TrackDetailPanel';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { NavisarDashboardPanel } from '@/components/NavisarDashboardPanel';
+import { Button } from '@/components/ui/button';
 import { Entity } from '@/types/entity';
 import { Track, TrackDisposition } from '@/types/track';
 
@@ -233,6 +234,9 @@ const Index = () => {
 
   const isNavisarPanel = activePanel === 'navisar';
   const showLeftPanel = Boolean(activePanel) && !isNavisarPanel;
+  const handleNavsarToggle = () => {
+    setActivePanel(prev => (prev === 'navisar' ? null : 'navisar'));
+  };
 
   return (
     <div 
@@ -254,6 +258,18 @@ const Index = () => {
               onOpenProtocolSim={handleOpenProtocolSim}
               onOpenSettings={() => setSettingsOpen(true)}
             />
+          </div>
+
+          <div className="pointer-events-none absolute right-4 top-4 z-50">
+            <Button
+              type="button"
+              onClick={handleNavsarToggle}
+              className="pointer-events-auto"
+              variant={isNavisarPanel ? 'secondary' : 'default'}
+              title="Toggle the bundled NAVISAR project view"
+            >
+              {isNavisarPanel ? 'Back to This Page' : 'Open NAVSAR Project'}
+            </Button>
           </div>
           
           {showLeftPanel && (

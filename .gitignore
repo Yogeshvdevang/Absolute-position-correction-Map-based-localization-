@@ -31,3 +31,9 @@ venv/
 tile-cache/
 app/tile-cache/
 app/visual-map-dbs/
+external/navisar-a-pi5/venv/
+external/navisar-a-pi5/.navisar.lock
+external/navisar-a-pi5/navisar-integration.log
+external/navisar-a-pi5/blackbox_logs/
+external/navisar-a-pi5/sensor_csv_logs/
+external/navisar-a-pi5/pixhawk_mavlink_csv_logs/
