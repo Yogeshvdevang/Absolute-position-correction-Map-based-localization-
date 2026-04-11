@@ -212,6 +212,7 @@ export const DroneSimView = () => {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const streamRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const bottomFovHelperRef = useRef<THREE.CameraHelper | null>(null);
   const droneCameraRefs = useRef<Record<CameraViewKey, THREE.PerspectiveCamera | null>>({
     bottom: null,
     bottomClean: null,
@@ -551,6 +552,7 @@ export const DroneSimView = () => {
       camera.fov = next;
       camera.updateProjectionMatrix();
     });
+    bottomFovHelperRef.current?.update();
   };
 
   const toggleCameraView = (view: CameraViewKey) => {
@@ -1137,34 +1139,62 @@ export const DroneSimView = () => {
 
     state.droneGroup = new THREE.Group();
 
-    const bodyGeo = new THREE.BoxGeometry(1.2, 0.4, 0.8);
+    const bodyGeo = new THREE.BoxGeometry(1.0, 0.4, 1.0);
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.castShadow = true;
     state.droneGroup.add(body);
 
-    const armGeo = new THREE.CylinderGeometry(0.1, 0.1, 3.5);
-    const armMat = new THREE.MeshStandardMaterial({ color: 0x1e293b });
+    const positions = [
+      { x: 1.2, z: 1.2 }, { x: -1.2, z: -1.2 },
+      { x: 1.2, z: -1.2 }, { x: -1.2, z: 1.2 }
+    ];
 
-    const arm1 = new THREE.Mesh(armGeo, armMat);
-    arm1.rotation.z = Math.PI / 2;
-    arm1.rotation.y = Math.PI / 4;
-    state.droneGroup.add(arm1);
+    const forwardArmTextureCanvas = document.createElement('canvas');
+    forwardArmTextureCanvas.width = 32;
+    forwardArmTextureCanvas.height = 256;
+    const forwardArmCtx = forwardArmTextureCanvas.getContext('2d');
+    if (forwardArmCtx) {
+      forwardArmCtx.fillStyle = '#7f1d1d';
+      forwardArmCtx.fillRect(0, 0, forwardArmTextureCanvas.width, forwardArmTextureCanvas.height);
+      forwardArmCtx.fillStyle = '#ef4444';
+      for (let y = 0; y < forwardArmTextureCanvas.height; y += 28) {
+        forwardArmCtx.fillRect(0, y, forwardArmTextureCanvas.width, 12);
+      }
+    }
+    const forwardArmTexture = new THREE.CanvasTexture(forwardArmTextureCanvas);
+    forwardArmTexture.wrapS = THREE.RepeatWrapping;
+    forwardArmTexture.wrapT = THREE.RepeatWrapping;
+    forwardArmTexture.needsUpdate = true;
 
-    const arm2 = new THREE.Mesh(armGeo, armMat);
-    arm2.rotation.z = Math.PI / 2;
-    arm2.rotation.y = -Math.PI / 4;
-    state.droneGroup.add(arm2);
+    const rearArmMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.5, roughness: 0.35 });
+    const forwardArmMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: forwardArmTexture,
+      metalness: 0.5,
+      roughness: 0.35
+    });
+
+    const addArm = (x: number, z: number) => {
+      const armLength = Math.hypot(x, z);
+      const armGeo = new THREE.CylinderGeometry(0.1, 0.1, armLength, 16);
+      const isForwardArm = z > 0;
+      const arm = new THREE.Mesh(armGeo, isForwardArm ? forwardArmMat : rearArmMat);
+      arm.position.set(x / 2, 0, z / 2);
+      arm.castShadow = true;
+      arm.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(x, 0, z).normalize()
+      );
+      state.droneGroup.add(arm);
+    };
+
+    positions.forEach((pos) => addArm(pos.x, pos.z));
 
     const motorGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.3);
     const motorMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8 });
     const propGeo = new THREE.CylinderGeometry(1.2, 1.2, 0.02, 32);
     const propMat = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, transparent: true, opacity: 0.4 });
-
-    const positions = [
-      { x: 1.2, z: 1.2 }, { x: -1.2, z: -1.2 },
-      { x: 1.2, z: -1.2 }, { x: -1.2, z: 1.2 }
-    ];
 
     positions.forEach(pos => {
       const motor = new THREE.Mesh(motorGeo, motorMat);
@@ -1176,11 +1206,11 @@ export const DroneSimView = () => {
       state.droneGroup?.add(prop);
     });
 
-    const arrowGeo = new THREE.ConeGeometry(0.15, 0.5, 32);
+    const arrowGeo = new THREE.ConeGeometry(0.24, 0.85, 32);
     const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
     const arrowMesh = new THREE.Mesh(arrowGeo, arrowMat);
     arrowMesh.rotation.x = Math.PI / 2;
-    arrowMesh.position.z = 0.65;
+    arrowMesh.position.z = 0.9;
     state.droneGroup.add(arrowMesh);
 
     state.velArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 0, 0x4ade80);
@@ -1211,6 +1241,15 @@ export const DroneSimView = () => {
     bottomCamera.position.set(0, -1.4, 0);
     bottomCamera.rotation.x = -Math.PI / 2;
     state.droneGroup.add(bottomCamera);
+    const bottomFovHelper = new THREE.CameraHelper(bottomCamera);
+    bottomFovHelper.setColors(0xffffff, 0xffffff, 0xffffff, 0xffffff, 0xffffff);
+    const helperMaterial = bottomFovHelper.material as THREE.LineBasicMaterial;
+    helperMaterial.color.set(0xffffff);
+    helperMaterial.vertexColors = false;
+    helperMaterial.transparent = true;
+    helperMaterial.opacity = 0.9;
+    helperMaterial.depthTest = false;
+    scene.add(bottomFovHelper);
 
     const bottomCleanCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
     bottomCleanCamera.position.copy(bottomCamera.position);
@@ -1526,6 +1565,14 @@ export const DroneSimView = () => {
       updateLoop();
       const viewportWidth = viewport.clientWidth || 1;
       const viewportHeight = viewport.clientHeight || 1;
+      const fovHelper = bottomFovHelperRef.current;
+      const bottomCam = droneCameraRefs.current.bottom;
+      if (fovHelper && bottomCam) {
+        state.droneGroup?.updateMatrixWorld(true);
+        bottomCam.updateMatrixWorld(true);
+        fovHelper.update();
+        fovHelper.visible = true;
+      }
 
       renderer.setScissorTest(true);
       renderer.setViewport(0, 0, viewportWidth, viewportHeight);
@@ -1556,7 +1603,11 @@ export const DroneSimView = () => {
           if (state.pathLine) state.pathLine.visible = false;
           if (state.trailLine) state.trailLine.visible = false;
         }
+        const hideFovHelper = view === 'bottom' || view === 'bottomClean';
+        const prevFovHelperVisible = fovHelper?.visible ?? false;
+        if (fovHelper && hideFovHelper) fovHelper.visible = false;
         renderer.render(scene, cam);
+        if (fovHelper && hideFovHelper) fovHelper.visible = prevFovHelperVisible;
         if (hideTrace) {
           if (state.pathLine) state.pathLine.visible = prevPathVisible;
           if (state.trailLine) state.trailLine.visible = prevTrailVisible;
@@ -1575,11 +1626,14 @@ export const DroneSimView = () => {
         const prevTrailVisible = state.trailLine?.visible ?? true;
         if (state.pathLine) state.pathLine.visible = false;
         if (state.trailLine) state.trailLine.visible = false;
+        const prevFovHelperVisible = fovHelper?.visible ?? false;
+        if (fovHelper) fovHelper.visible = false;
         cleanCamera.aspect = INSET.width / INSET.height;
         cleanCamera.updateProjectionMatrix();
         streamRenderer.setViewport(0, 0, INSET.width, INSET.height);
         streamRenderer.setScissorTest(false);
         streamRenderer.render(scene, cleanCamera);
+        if (fovHelper) fovHelper.visible = prevFovHelperVisible;
         if (state.pathLine) state.pathLine.visible = prevPathVisible;
         if (state.trailLine) state.trailLine.visible = prevTrailVisible;
         try {
@@ -1666,6 +1720,7 @@ export const DroneSimView = () => {
       left: leftCamera,
       right: rightCamera,
     };
+    bottomFovHelperRef.current = bottomFovHelper;
     sceneRef.current = scene;
     controlsRef.current = controls;
 
@@ -1676,6 +1731,11 @@ export const DroneSimView = () => {
       if (animRef.current) cancelAnimationFrame(animRef.current);
       telemetryWsRef.current?.close();
       cameraWsRef.current?.close();
+      if (bottomFovHelperRef.current) {
+        bottomFovHelperRef.current.geometry.dispose();
+        (bottomFovHelperRef.current.material as THREE.Material).dispose();
+        bottomFovHelperRef.current = null;
+      }
       controls.dispose();
       renderer.dispose();
       streamRenderer.dispose();
