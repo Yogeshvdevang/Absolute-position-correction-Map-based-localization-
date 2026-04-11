@@ -995,10 +995,15 @@ export const DroneSimView = () => {
         setGamepadConnected(true);
         setGamepadName(pad.id || 'Generic Gamepad');
 
-        const yawFallbackCandidates = [pad.axes[3], pad.axes[4], pad.axes[5]]
-          .map((value, index) => ({ value: value ?? 0, axisIndex: index + 3 }))
-          .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
-        const yawAxis = yawFallbackCandidates[0]?.value ?? 0;
+        const yawAxis = rcProfileId === 'radiomaster-pocket'
+          ? (pad.axes[3] ?? 0)
+          : (() => {
+            const yawFallbackCandidates = [pad.axes[3], pad.axes[4], pad.axes[5]]
+              .map((value, index) => ({ value: value ?? 0, axisIndex: index + 3 }))
+              .filter(({ value }) => Math.abs(value) < 0.98)
+              .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+            return yawFallbackCandidates[0]?.value ?? (pad.axes[3] ?? 0);
+          })();
 
         const axes: Record<AxisKey, number> = {
           roll: pad.axes[0] ?? 0,
@@ -1079,7 +1084,7 @@ export const DroneSimView = () => {
 
     rafId = window.requestAnimationFrame(update);
     return () => window.cancelAnimationFrame(rafId);
-  }, [axisReverse, rcCalibrationRunning]);
+  }, [axisReverse, rcCalibrationRunning, rcProfileId]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
