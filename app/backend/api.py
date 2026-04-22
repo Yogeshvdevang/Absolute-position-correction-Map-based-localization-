@@ -352,6 +352,89 @@ def _list_cached_zoom_levels(map_type: str) -> List[int]:
   return sorted(zoom_levels)
 
 
+def _resolve_visual_localization_bootstrap() -> Tuple[Optional[Path], Optional[int]]:
+  configured_path = os.getenv("VISUAL_LOCALIZATION_MAP_DB_PATH")
+  if configured_path:
+    candidate = Path(configured_path)
+    if candidate.exists():
+      zoom = visual_localization.config.tile_zoom_level
+      if zoom is None:
+        try:
+          zoom = visual_localization._infer_tile_zoom(candidate)
+        except Exception:
+          zoom = None
+      return candidate, zoom
+
+  existing_path = visual_localization.config.map_db_path
+  if existing_path:
+    candidate = Path(existing_path)
+    if candidate.exists():
+      zoom = visual_localization.config.tile_zoom_level
+      if zoom is None:
+        try:
+          zoom = visual_localization._infer_tile_zoom(candidate)
+        except Exception:
+          zoom = None
+      return candidate, zoom
+
+  db_dirs = [path for path in VISUAL_TILE_DB_DIR.iterdir() if path.is_dir()]
+  if not db_dirs:
+    return None, None
+
+  candidate = max(db_dirs, key=lambda path: path.stat().st_mtime)
+  try:
+    zoom = visual_localization._infer_tile_zoom(candidate)
+  except Exception:
+    zoom = None
+  return candidate, zoom
+
+
+def _bootstrap_visual_localization() -> Dict[str, Any]:
+  probe = visual_localization.probe()
+  auto_mode = os.getenv("VISUAL_LOCALIZATION_ENABLED", "auto").strip().lower()
+  candidate, zoom = _resolve_visual_localization_bootstrap()
+
+  if not probe.get("valid"):
+    updated = visual_localization.config.model_copy(update={
+      "enabled": False,
+    })
+    visual_localization.update(updated)
+    return {
+      "enabled": False,
+      "reason": probe.get("reason"),
+      "map_db_path": None,
+      "tile_zoom_level": None,
+    }
+
+  if candidate is None:
+    updated = visual_localization.config.model_copy(update={
+      "enabled": False,
+      "map_db_path": None,
+      "tile_zoom_level": None,
+    })
+    visual_localization.update(updated)
+    return {
+      "enabled": False,
+      "reason": "No visual map DB found",
+      "map_db_path": None,
+      "tile_zoom_level": None,
+    }
+
+  should_enable = auto_mode not in {"0", "false", "off", "no"}
+  updated = visual_localization.config.model_copy(update={
+    "enabled": should_enable,
+    "map_db_path": str(candidate),
+    "tile_zoom_level": zoom,
+  })
+  visual_localization.update(updated)
+  return {
+    "enabled": should_enable,
+    "reason": None,
+    "map_db_path": str(candidate),
+    "tile_zoom_level": zoom,
+  }
+
+
 def _export_tile_cache_to_visual_db(req: VisualLocalizationTileDbRequest) -> Dict[str, Any]:
   map_root = TILE_CACHE_DIR / req.map_type
   if not map_root.exists():
@@ -501,6 +584,77 @@ def _decode_frame(image_b64: Optional[str]) -> Optional[np.ndarray]:
     return None
 
 
+def _ensure_color_image(image: Optional[np.ndarray]) -> Optional[np.ndarray]:
+  if image is None:
+    return None
+  if image.ndim == 2:
+    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+  if image.ndim == 3 and image.shape[2] == 4:
+    return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+  return image
+
+
+def _encode_preview_image(image: Optional[np.ndarray], max_side: int = 640) -> Optional[str]:
+  frame = _ensure_color_image(image)
+  if frame is None or frame.size == 0:
+    return None
+
+  height, width = frame.shape[:2]
+  longest = max(height, width)
+  if longest > max_side:
+    scale = max_side / float(longest)
+    frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+
+  success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+  if not success:
+    return None
+  return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+
+def _build_native_debug_artifacts(
+  frame_image: Optional[np.ndarray],
+  query_tile: Optional[np.ndarray],
+  map_patch: Optional[np.ndarray],
+  match_x: Optional[int],
+  match_y: Optional[int],
+  tile_size: Optional[int],
+) -> Dict[str, Any]:
+  query_preview = _ensure_color_image(query_tile if query_tile is not None else frame_image)
+  reference_preview = _ensure_color_image(map_patch)
+  match_preview = None
+
+  if reference_preview is not None:
+    match_preview = reference_preview.copy()
+    if (
+      match_x is not None and
+      match_y is not None and
+      tile_size is not None and
+      tile_size > 0
+    ):
+      x1 = max(0, int(match_x))
+      y1 = max(0, int(match_y))
+      x2 = min(match_preview.shape[1], x1 + int(tile_size))
+      y2 = min(match_preview.shape[0], y1 + int(tile_size))
+      cv2.rectangle(match_preview, (x1, y1), (x2, y2), (0, 220, 255), 2)
+      cv2.putText(
+        match_preview,
+        "Native APC Match",
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+      )
+
+  return {
+    "mode": "native_apc",
+    "query_image_b64": _encode_preview_image(query_preview),
+    "reference_image_b64": _encode_preview_image(reference_preview),
+    "match_image_b64": _encode_preview_image(match_preview),
+  }
+
+
 def _run_apc_pipeline(frame: APCFrame) -> APCResult:
   global apc_last_ts
   now = datetime.now(timezone.utc).timestamp()
@@ -511,6 +665,7 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
   img = _decode_frame(frame.image_b64)
   if img is None:
     img = frame_buffer.get()
+  external_debug: Optional[Dict[str, Any]] = None
   if img is not None and visual_localization.config.enabled:
     try:
       external_result = visual_localization.run_frame(
@@ -523,6 +678,14 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
         pitch=frame.pitch,
         roll=frame.roll,
       )
+      external_debug = {
+        "mode": external_result.get("map_mode") or "visual_localization",
+        "matched_image": external_result.get("matched_image"),
+        "num_inliers": external_result.get("num_inliers"),
+        "query_image_b64": external_result.get("query_image_b64"),
+        "reference_image_b64": external_result.get("reference_image_b64"),
+        "match_image_b64": external_result.get("match_image_b64"),
+      }
       if external_result.get("success"):
         fused_lat = external_result.get("predicted_lat")
         fused_lon = external_result.get("predicted_lon")
@@ -547,6 +710,7 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
             "matched_image": external_result.get("matched_image"),
             "num_inliers": external_result.get("num_inliers"),
             "external_output_dir": external_result.get("output_dir"),
+            "debug": external_debug,
           },
         )
     except Exception as exc:
@@ -602,7 +766,17 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
     confidence=float(score),
     error_radius_m=max(5.0, (1.0 - float(score)) * 200),
     source="apc-coarse",
-    meta=frame.meta or {}
+    meta={
+      **(frame.meta or {}),
+      "debug": external_debug or _build_native_debug_artifacts(
+        frame_image=img,
+        query_tile=tile,
+        map_patch=map_patch,
+        match_x=match_x,
+        match_y=match_y,
+        tile_size=tile_size,
+      ),
+    }
   )
 
 
@@ -626,6 +800,7 @@ async def startup_event():
     except Exception:
       apc_raster = None
       apc_preprocessor = None
+  _bootstrap_visual_localization()
   asyncio.create_task(_bridge_telemetry_loop())
   asyncio.create_task(_tracker_availability_loop())
   # Disabled external tracker autostart to avoid port/socket conflicts. 
@@ -785,6 +960,42 @@ async def mission_get():
     return data
 
 
+@app.get("/planner/state")
+async def planner_state():
+  planner_waypoints = [
+    {
+      "id": f"WP-{item.seq + 1}",
+      "name": f"WP-{item.seq + 1}",
+      "lat": item.lat,
+      "lon": item.lon,
+      "alt": item.alt,
+    }
+    for item in mission_plan
+  ]
+  operations = []
+  if mission_plan:
+    operations.append({
+      "id": "backend-op",
+      "name": "Live Mission Planner",
+      "missions": [
+        {
+          "id": "backend-mission",
+          "name": "Imported Mission",
+          "description": "Mission mirrored from the backend mission cache.",
+          "typeId": "route-inspection",
+          "status": "Ready",
+          "asset": VEHICLE_ID,
+          "waypoints": planner_waypoints,
+          "cruiseSpeed": 15,
+        }
+      ],
+    })
+  return {
+    "operations": operations,
+    "vehicle_id": VEHICLE_ID,
+  }
+
+
 @app.post("/mission")
 async def mission_upload(body: MissionUpload):
   async with httpx.AsyncClient() as client:
@@ -932,6 +1143,23 @@ async def ws_apc(ws: WebSocket):
 @app.websocket("/camera")
 async def camera_ws(websocket: WebSocket):
   await camera_receiver(websocket)
+
+
+@app.get("/camera/latest.jpg")
+async def camera_latest_jpg():
+  frame = frame_buffer.get()
+  if frame is None:
+    return Response(status_code=404, content=b"No camera frame available yet")
+
+  success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+  if not success:
+    return Response(status_code=500, content=b"Failed to encode camera frame")
+
+  return Response(
+    content=encoded.tobytes(),
+    media_type="image/jpeg",
+    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+  )
 
 
 @app.get("/apc/train/status")

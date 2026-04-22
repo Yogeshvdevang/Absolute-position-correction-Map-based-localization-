@@ -129,6 +129,8 @@ class BaseMapReader(ABC):
             raise FileNotFoundError(f"Image file not found at {image_path}")
 
         img = cv2.imread(str(image_path), self.cv2_read_mode)
+        if img is not None:
+            img = np.squeeze(img)
 
         return img
 

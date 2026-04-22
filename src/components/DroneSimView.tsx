@@ -35,6 +35,7 @@ type SimState = {
   accArrow: THREE.ArrowHelper | null;
   axisGroup: THREE.Group | null;
   groundPlane: THREE.Mesh | null;
+  propellers: THREE.Mesh[];
 };
 
 type MissionPreset = {
@@ -91,6 +92,57 @@ const CAMERA_VIEW_TITLES: Record<CameraViewKey, string> = {
   left: 'Left Facing Drone Cam',
   right: 'Right Facing Drone Cam',
 };
+const CAMERA_FRUSTUM_DISTANCE = 12;
+
+const createFrustumHelper = (camera: THREE.PerspectiveCamera, distance = CAMERA_FRUSTUM_DISTANCE) => {
+  const corners = Array.from({ length: 4 }, () => new THREE.Vector3());
+  const linePoints = Array.from({ length: 16 }, () => new THREE.Vector3());
+  const geometry = new THREE.BufferGeometry().setFromPoints(linePoints);
+  const material = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.9,
+    depthTest: false,
+  });
+  const helper = new THREE.LineSegments(geometry, material);
+  helper.frustumCulled = false;
+  helper.renderOrder = 1000;
+
+  const update = () => {
+    camera.updateMatrixWorld(true);
+    const halfHeight = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)) * distance;
+    const halfWidth = halfHeight * camera.aspect;
+
+    corners[0].set(-halfWidth, -halfHeight, -distance).applyMatrix4(camera.matrixWorld);
+    corners[1].set(halfWidth, -halfHeight, -distance).applyMatrix4(camera.matrixWorld);
+    corners[2].set(halfWidth, halfHeight, -distance).applyMatrix4(camera.matrixWorld);
+    corners[3].set(-halfWidth, halfHeight, -distance).applyMatrix4(camera.matrixWorld);
+
+    const cameraPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+
+    const segments: Array<[THREE.Vector3, THREE.Vector3]> = [
+      [cameraPos, corners[0]],
+      [cameraPos, corners[1]],
+      [cameraPos, corners[2]],
+      [cameraPos, corners[3]],
+      [corners[0], corners[1]],
+      [corners[1], corners[2]],
+      [corners[2], corners[3]],
+      [corners[3], corners[0]],
+    ];
+
+    segments.forEach(([start, end], index) => {
+      linePoints[index * 2].copy(start);
+      linePoints[index * 2 + 1].copy(end);
+    });
+    geometry.setFromPoints(linePoints);
+    geometry.computeBoundingSphere();
+  };
+
+  update();
+  return { helper, update };
+};
+
 const RC_PROFILES: Array<{
   id: RcProfileId;
   label: string;
@@ -212,7 +264,8 @@ export const DroneSimView = () => {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const streamRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const bottomFovHelperRef = useRef<THREE.CameraHelper | null>(null);
+  const bottomFovHelperRef = useRef<THREE.LineSegments | null>(null);
+  const bottomFovHelperUpdateRef = useRef<(() => void) | null>(null);
   const droneCameraRefs = useRef<Record<CameraViewKey, THREE.PerspectiveCamera | null>>({
     bottom: null,
     bottomClean: null,
@@ -371,7 +424,8 @@ export const DroneSimView = () => {
     velArrow: null,
     accArrow: null,
     axisGroup: null,
-    groundPlane: null
+    groundPlane: null,
+    propellers: []
   });
 
   const inputRef = useRef({
@@ -1138,6 +1192,7 @@ export const DroneSimView = () => {
     state.groundPlane = plane;
 
     state.droneGroup = new THREE.Group();
+    state.propellers = [];
 
     const bodyGeo = new THREE.BoxGeometry(1.0, 0.4, 1.0);
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
@@ -1193,8 +1248,38 @@ export const DroneSimView = () => {
 
     const motorGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.3);
     const motorMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8 });
-    const propGeo = new THREE.CylinderGeometry(1.2, 1.2, 0.02, 32);
-    const propMat = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, transparent: true, opacity: 0.4 });
+    const propTextureCanvas = document.createElement('canvas');
+    propTextureCanvas.width = 256;
+    propTextureCanvas.height = 256;
+    const propCtx = propTextureCanvas.getContext('2d');
+    if (propCtx) {
+      propCtx.clearRect(0, 0, propTextureCanvas.width, propTextureCanvas.height);
+      propCtx.fillStyle = 'rgba(14, 165, 233, 0.24)';
+      propCtx.beginPath();
+      propCtx.arc(128, 128, 118, 0, Math.PI * 2);
+      propCtx.fill();
+
+      propCtx.strokeStyle = 'rgba(2, 6, 23, 0.95)';
+      propCtx.lineWidth = 32;
+      propCtx.lineCap = 'round';
+      propCtx.lineJoin = 'round';
+      propCtx.beginPath();
+      propCtx.moveTo(36, 128);
+      propCtx.bezierCurveTo(36, 68, 94, 56, 122, 128);
+      propCtx.bezierCurveTo(150, 200, 208, 188, 220, 128);
+      propCtx.bezierCurveTo(220, 68, 162, 56, 134, 128);
+      propCtx.bezierCurveTo(106, 200, 48, 188, 36, 128);
+      propCtx.stroke();
+    }
+    const propTexture = new THREE.CanvasTexture(propTextureCanvas);
+    propTexture.needsUpdate = true;
+    const propGeo = new THREE.CircleGeometry(0.6, 48);
+    const propMat = new THREE.MeshBasicMaterial({
+      map: propTexture,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+    });
 
     positions.forEach(pos => {
       const motor = new THREE.Mesh(motorGeo, motorMat);
@@ -1203,7 +1288,9 @@ export const DroneSimView = () => {
 
       const prop = new THREE.Mesh(propGeo, propMat);
       prop.position.set(pos.x, 0.25, pos.z);
+      prop.rotation.x = -Math.PI / 2;
       state.droneGroup?.add(prop);
+      state.propellers.push(prop);
     });
 
     const arrowGeo = new THREE.ConeGeometry(0.24, 0.85, 32);
@@ -1241,14 +1328,7 @@ export const DroneSimView = () => {
     bottomCamera.position.set(0, -1.4, 0);
     bottomCamera.rotation.x = -Math.PI / 2;
     state.droneGroup.add(bottomCamera);
-    const bottomFovHelper = new THREE.CameraHelper(bottomCamera);
-    bottomFovHelper.setColors(0xffffff, 0xffffff, 0xffffff, 0xffffff, 0xffffff);
-    const helperMaterial = bottomFovHelper.material as THREE.LineBasicMaterial;
-    helperMaterial.color.set(0xffffff);
-    helperMaterial.vertexColors = false;
-    helperMaterial.transparent = true;
-    helperMaterial.opacity = 0.9;
-    helperMaterial.depthTest = false;
+    const { helper: bottomFovHelper, update: updateBottomFovHelper } = createFrustumHelper(bottomCamera);
     scene.add(bottomFovHelper);
 
     const bottomCleanCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
@@ -1563,14 +1643,17 @@ export const DroneSimView = () => {
     const animate = () => {
       animRef.current = requestAnimationFrame(animate);
       updateLoop();
+      const spinSpeed = stateRef.current.flying || stateRef.current.manualMode ? 1.1 : 0.35;
+      stateRef.current.propellers.forEach((prop, index) => {
+        const direction = index % 2 === 0 ? 1 : -1;
+        prop.rotateZ(spinSpeed * direction);
+      });
       const viewportWidth = viewport.clientWidth || 1;
       const viewportHeight = viewport.clientHeight || 1;
       const fovHelper = bottomFovHelperRef.current;
-      const bottomCam = droneCameraRefs.current.bottom;
-      if (fovHelper && bottomCam) {
+      if (fovHelper && bottomFovHelperUpdateRef.current) {
         state.droneGroup?.updateMatrixWorld(true);
-        bottomCam.updateMatrixWorld(true);
-        fovHelper.update();
+        bottomFovHelperUpdateRef.current();
         fovHelper.visible = true;
       }
 
@@ -1721,6 +1804,7 @@ export const DroneSimView = () => {
       right: rightCamera,
     };
     bottomFovHelperRef.current = bottomFovHelper;
+    bottomFovHelperUpdateRef.current = updateBottomFovHelper;
     sceneRef.current = scene;
     controlsRef.current = controls;
 
@@ -1736,6 +1820,7 @@ export const DroneSimView = () => {
         (bottomFovHelperRef.current.material as THREE.Material).dispose();
         bottomFovHelperRef.current = null;
       }
+      bottomFovHelperUpdateRef.current = null;
       controls.dispose();
       renderer.dispose();
       streamRenderer.dispose();

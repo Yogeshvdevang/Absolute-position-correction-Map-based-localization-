@@ -8,6 +8,7 @@ import { EntityDetailPanel } from '@/components/EntityDetailPanel';
 import { TrackDetailPanel } from '@/components/TrackDetailPanel';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { NavisarDashboardPanel } from '@/components/NavisarDashboardPanel';
+import { ApcDashboardPanel } from '@/components/ApcDashboardPanel';
 import { Button } from '@/components/ui/button';
 import { Entity } from '@/types/entity';
 import { Track, TrackDisposition } from '@/types/track';
@@ -233,6 +234,7 @@ const Index = () => {
   };
 
   const isNavisarPanel = activePanel === 'navisar';
+  const isApcPanel = activePanel === 'select';
   const showLeftPanel = Boolean(activePanel) && !isNavisarPanel;
   const handleNavsarToggle = () => {
     setActivePanel(prev => (prev === 'navisar' ? null : 'navisar'));
@@ -260,7 +262,7 @@ const Index = () => {
             />
           </div>
 
-          <div className="pointer-events-none absolute right-4 top-4 z-50">
+          <div className="pointer-events-none absolute right-4 top-20 z-50 flex flex-col items-end">
             <Button
               type="button"
               onClick={handleNavsarToggle}
@@ -299,6 +301,8 @@ const Index = () => {
           <div className="flex-1 flex flex-col min-w-0">
             {isNavisarPanel ? (
               <NavisarDashboardPanel />
+            ) : isApcPanel ? (
+              <ApcDashboardPanel />
             ) : (
               <>
                 <div className="flex-1 min-h-0">
@@ -322,7 +326,7 @@ const Index = () => {
             )}
           </div>
           
-          {!isNavisarPanel && (isDetailPanelOpen || selectedTrack) && (
+          {!isNavisarPanel && !isApcPanel && (isDetailPanelOpen || selectedTrack) && (
             <>
               <div className="w-80 flex-shrink-0">
                 {selectedTrack ? (

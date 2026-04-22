@@ -25,6 +25,58 @@ const ControlRow = ({ label, children }: { label: string; children: ReactNode })
   </div>
 );
 
+const MetricTile = ({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) => (
+  <div className="rounded-lg border border-border/60 bg-background/70 p-2">
+    <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">{label}</div>
+    <div className="mt-1 font-mono text-sm font-semibold text-foreground">{value}</div>
+    {hint ? <div className="mt-1 text-[10px] text-muted-foreground">{hint}</div> : null}
+  </div>
+);
+
+const statusToneClasses: Record<'ready' | 'warn' | 'error' | 'idle', string> = {
+  ready: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200',
+  warn: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+  error: 'border-rose-500/30 bg-rose-500/10 text-rose-100',
+  idle: 'border-border/60 bg-background/60 text-muted-foreground',
+};
+
+const classifyStatusTone = (value: string | null | undefined): 'ready' | 'warn' | 'error' | 'idle' => {
+  if (!value) return 'idle';
+  const normalized = value.toLowerCase();
+  if (
+    normalized.includes('fail') ||
+    normalized.includes('error') ||
+    normalized.includes('invalid') ||
+    normalized.includes('missing') ||
+    normalized.includes('disconnected') ||
+    normalized.includes('no coordinates')
+  ) {
+    return 'error';
+  }
+  if (
+    normalized.includes('warning') ||
+    normalized.includes('waiting') ||
+    normalized.includes('pending') ||
+    normalized.includes('standby')
+  ) {
+    return 'warn';
+  }
+  return 'ready';
+};
+
+const formatNumber = (value: unknown, digits = 2) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
+  return value.toFixed(digits);
+};
+
 export const MapBasedModulePanel = () => {
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const sourceFeedSocketRef = useRef<WebSocket | null>(null);
@@ -413,26 +465,131 @@ export const MapBasedModulePanel = () => {
     }
   };
 
+  const backendLabel =
+    tileMatcherBackend === 'visual_localization'
+      ? 'Visual Localization'
+      : tileMatcherBackend === 'orb'
+        ? 'ORB + RANSAC'
+        : 'Native APC';
+  const trackingState = mapMatchBusy ? 'Locating' : apcResult ? 'Tracking' : 'Standby';
+  const fusionState = useManualInit ? 'Manual Init' : lastInit ? 'Telemetry Locked' : 'Ignoring';
+  const latestLatitude =
+    typeof apcResult?.lat === 'number' && Number.isFinite(apcResult.lat)
+      ? apcResult.lat
+      : lastInit?.lat ?? null;
+  const latestLongitude =
+    typeof apcResult?.lon === 'number' && Number.isFinite(apcResult.lon)
+      ? apcResult.lon
+      : lastInit?.lon ?? null;
+  const latestConfidence =
+    typeof apcResult?.confidence === 'number' && Number.isFinite(apcResult.confidence)
+      ? apcResult.confidence
+      : null;
+  const latestErrorRadius =
+    typeof apcResult?.error_radius_m === 'number' && Number.isFinite(apcResult.error_radius_m)
+      ? apcResult.error_radius_m
+      : null;
+  const mapMatchTone = classifyStatusTone(mapMatchStatus);
+  const liveFeedTone = classifyStatusTone(liveFeedStatus);
+  const visualTone = visualProbe?.valid ? 'ready' : classifyStatusTone(visualStatus);
+  const fusionTone = trackingState === 'Tracking' ? 'ready' : trackingState === 'Locating' ? 'warn' : 'idle';
+
   return (
     <div className="h-full flex flex-col bg-panel border-r border-panel-border">
       <div className="p-3 border-b border-panel-border">
-        <div>
-          <div className="text-xs text-muted-foreground uppercase tracking-[0.14em]">Map-Based Module</div>
-          <div className="text-sm font-semibold text-foreground">Absolute Position Correction</div>
+        <div className="space-y-2">
+          <div>
+            <div className="text-xs text-muted-foreground uppercase tracking-[0.14em]">Map-Based Module</div>
+            <div className="text-sm font-semibold text-foreground">Absolute Position Correction</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="outline" className="border-border/60 bg-background/60 text-[10px] uppercase tracking-[0.12em]">
+              Night VPS
+            </Badge>
+            <Badge variant="outline" className="border-border/60 bg-background/60 text-[10px] uppercase tracking-[0.12em]">
+              LiveNav
+            </Badge>
+            <Badge variant="outline" className="border-border/60 bg-background/60 text-[10px] uppercase tracking-[0.12em]">
+              IMU + Visual
+            </Badge>
+          </div>
         </div>
       </div>
 
       <ScrollArea className="flex-1">
         <div className="p-3 space-y-4">
+          <div className="rounded-xl border border-border/60 bg-gradient-to-b from-background/90 to-background/60 p-3 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <SectionLabel>Operations Overview</SectionLabel>
+                <div className="mt-1 text-sm font-semibold text-foreground">Absolute Position Correction Console</div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  Sensor-constrained visual localization with tile voting and fine alignment.
+                </div>
+              </div>
+              <div className={`rounded-md border px-2 py-1 text-[10px] uppercase tracking-[0.12em] ${statusToneClasses[fusionTone]}`}>
+                {trackingState}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <MetricTile label="Latitude" value={latestLatitude !== null ? formatNumber(latestLatitude, 6) : '--'} />
+              <MetricTile label="Longitude" value={latestLongitude !== null ? formatNumber(latestLongitude, 6) : '--'} />
+              <MetricTile
+                label="Confidence"
+                value={latestConfidence !== null ? formatNumber(latestConfidence, 2) : '--'}
+                hint="Latest localization confidence"
+              />
+              <MetricTile
+                label="Error Radius"
+                value={latestErrorRadius !== null ? `${formatNumber(latestErrorRadius, 1)} m` : '--'}
+                hint="Estimated absolute fix uncertainty"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className={`rounded-lg border p-2 ${statusToneClasses[liveFeedTone]}`}>
+                <div className="text-[10px] uppercase tracking-[0.12em]">Feed Link</div>
+                <div className="mt-1 text-xs font-semibold text-foreground">
+                  {liveFeedStatus || 'Waiting for frames'}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-background/70 p-2">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Backend</div>
+                <div className="mt-1 text-xs font-semibold text-foreground">{backendLabel}</div>
+              </div>
+              <div className={`rounded-lg border p-2 ${statusToneClasses[visualTone]}`}>
+                <div className="text-[10px] uppercase tracking-[0.12em]">Visual DB</div>
+                <div className="mt-1 text-xs font-semibold text-foreground">
+                  {visualProbe?.valid ? 'Vendor ready' : visualStatus || 'Not configured'}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-background/70 p-2">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Fusion State</div>
+                <div className="mt-1 text-xs font-semibold text-foreground">{fusionState}</div>
+              </div>
+            </div>
+          </div>
+
           <div className="rounded-lg border border-border/60 bg-background/60 p-3">
             <SectionLabel>System Structure</SectionLabel>
-            <div className="mt-2 text-[11px] text-muted-foreground">
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {['Camera Frame', 'Preprocessing', 'Abstraction', 'Tile Matching', 'Voting', 'Refinement', 'Absolute Output'].map((stage) => (
+                <div
+                  key={stage}
+                  className="rounded-md border border-border/60 bg-background/70 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-foreground"
+                >
+                  {stage}
+                </div>
+              ))}
+            </div>
+            <div className="hidden text-[11px] text-muted-foreground">
               Camera Frame → Preprocessing → Abstraction → Tile Matching → Voting → Refinement → Absolute Output
             </div>
           </div>
 
-          <Accordion type="multiple" defaultValue={['map-db', 'sensor', 'abstraction']}>
-            <AccordionItem value="map-db">
+          <Accordion type="multiple" defaultValue={['map-db', 'sensor', 'abstraction']} className="space-y-3">
+            <AccordionItem value="map-db" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">1. Map Database Manager</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -490,7 +647,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="sensor">
+            <AccordionItem value="sensor" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">2. Sensor Constraint Panel</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -536,7 +693,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="abstraction">
+            <AccordionItem value="abstraction" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">3. Abstraction Engine Control</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -683,7 +840,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="tile-matching">
+            <AccordionItem value="tile-matching" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">4. Tile Matching Engine</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -843,7 +1000,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="voting">
+            <AccordionItem value="voting" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">5. Voting & Confidence</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -891,7 +1048,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="refinement">
+            <AccordionItem value="refinement" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">6. Coarse-to-Fine Refinement</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -939,7 +1096,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="output">
+            <AccordionItem value="output" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">7. Output + Diagnostics</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">
@@ -947,27 +1104,27 @@ export const MapBasedModulePanel = () => {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
                       <div className="text-[10px] text-muted-foreground">Latitude</div>
-                      <div className="font-mono text-foreground">28.6139</div>
+                      <div className="font-mono text-foreground">{latestLatitude !== null ? formatNumber(latestLatitude, 6) : '--'}</div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
                       <div className="text-[10px] text-muted-foreground">Longitude</div>
-                      <div className="font-mono text-foreground">77.2090</div>
+                      <div className="font-mono text-foreground">{latestLongitude !== null ? formatNumber(latestLongitude, 6) : '--'}</div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
-                      <div className="text-[10px] text-muted-foreground">UTM X/Y</div>
-                      <div className="font-mono text-foreground">432100 / 3167200</div>
+                      <div className="text-[10px] text-muted-foreground">Backend</div>
+                      <div className="font-mono text-foreground">{backendLabel}</div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
                       <div className="text-[10px] text-muted-foreground">Confidence</div>
-                      <div className="font-mono text-foreground">0.92</div>
+                      <div className="font-mono text-foreground">{latestConfidence !== null ? formatNumber(latestConfidence, 2) : '--'}</div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
                       <div className="text-[10px] text-muted-foreground">Error Radius</div>
-                      <div className="font-mono text-foreground">12 m</div>
+                      <div className="font-mono text-foreground">{latestErrorRadius !== null ? `${formatNumber(latestErrorRadius, 1)} m` : '--'}</div>
                     </div>
                     <div className="rounded-md border border-border/60 bg-background/60 p-2">
-                      <div className="text-[10px] text-muted-foreground">Fatal Error</div>
-                      <div className="font-mono text-destructive">No</div>
+                      <div className="text-[10px] text-muted-foreground">Tracking State</div>
+                      <div className={mapMatchTone === 'error' ? 'font-mono text-destructive' : 'font-mono text-foreground'}>{trackingState}</div>
                     </div>
                   </div>
 
@@ -990,7 +1147,7 @@ export const MapBasedModulePanel = () => {
               </AccordionContent>
             </AccordionItem>
 
-            <AccordionItem value="failsafe">
+            <AccordionItem value="failsafe" className="rounded-xl border border-border/60 bg-background/60 px-3">
               <AccordionTrigger className="text-sm">8. Failsafe & Safety</AccordionTrigger>
               <AccordionContent>
                 <div className="space-y-3">

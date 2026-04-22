@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import sys
 from pathlib import Path
@@ -14,6 +15,30 @@ def _to_builtin_number(value: Any) -> Any:
   if isinstance(value, np.generic):
     return value.item()
   return value
+
+
+def _encode_jpeg_base64(image: Any, max_side: int = 640) -> Optional[str]:
+  if image is None:
+    return None
+  frame = np.asarray(image)
+  if frame.size == 0:
+    return None
+
+  if frame.ndim == 2:
+    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+  elif frame.ndim == 3 and frame.shape[2] == 4:
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+  height, width = frame.shape[:2]
+  longest = max(height, width)
+  if longest > max_side:
+    scale = max_side / float(longest)
+    frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+
+  success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+  if not success:
+    return None
+  return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
 class VisualLocalizationConfig(BaseModel):
@@ -248,6 +273,7 @@ class VisualLocalizationService:
     gray = image
     if image.ndim == 3:
       gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = np.squeeze(gray)
 
     height, width = gray.shape[:2]
     query_processor.camera_model = CameraModel(
@@ -282,6 +308,9 @@ class VisualLocalizationService:
     result = pipeline.run_on_image(processed_query, output_path=None)
     predicted = result.get("predicted_coordinate")
     matched_image = result.get("matched_image")
+    query_preview = result.get("query_preview") or getattr(processed_query, "image", None)
+    reference_preview = result.get("reference_preview") or getattr(matched_image, "image", None)
+    match_visualization = result.get("match_visualization")
 
     return {
       "success": bool(result.get("is_match")),
@@ -292,6 +321,9 @@ class VisualLocalizationService:
       "num_inliers": _to_builtin_number(result.get("num_inliers")),
       "source": "visual_localization_internal",
       "map_mode": runtime["map_mode"],
+      "query_image_b64": _encode_jpeg_base64(query_preview),
+      "reference_image_b64": _encode_jpeg_base64(reference_preview),
+      "match_image_b64": _encode_jpeg_base64(match_visualization),
     }
 
   def probe(self) -> Dict[str, Any]:

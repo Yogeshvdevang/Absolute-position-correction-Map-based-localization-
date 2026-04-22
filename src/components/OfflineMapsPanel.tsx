@@ -7,6 +7,15 @@ import { Switch } from './ui/switch';
 import { Slider } from './ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
+type BBox = { west: number; south: number; east: number; north: number };
+type RegionOption = 'asia' | 'custom';
+type LocationSearchResult = {
+  display_name: string;
+  lat: string;
+  lon: string;
+  place_id: number;
+};
+
 const SectionLabel = ({ children }: { children: string }) => (
   <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">{children}</div>
 );
@@ -21,13 +30,37 @@ const ControlRow = ({ label, children }: { label: string; children: ReactNode })
 interface OfflineMapsPanelProps {
   drawActive?: boolean;
   onDrawActiveChange?: (active: boolean) => void;
-  bbox?: { west: number; south: number; east: number; north: number } | null;
-  onBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
+  bbox?: BBox | null;
+  onBBoxChange?: (bbox: BBox | null) => void;
   mapZoom?: number;
   previewImages?: { min: { url: string; label: string } | null; max: { url: string; label: string } | null };
   onCapturePreview?: (which: 'min' | 'max', zoom: number) => void;
-  onBudgetBBoxChange?: (bbox: { west: number; south: number; east: number; north: number } | null) => void;
+  onBudgetBBoxChange?: (bbox: BBox | null) => void;
 }
+
+const DEFAULT_ASIA_BBOX = {
+  west: '25.0',
+  south: '-10.0',
+  east: '180.0',
+  north: '82.0'
+};
+
+const formatCoord = (value: number) => value.toFixed(6);
+
+const buildBBoxFromCenterAndRadius = (lon: number, lat: number, radiusKm: number): BBox => {
+  const boundedLat = Math.max(-85, Math.min(85, lat));
+  const latDelta = radiusKm / 110.574;
+  const cosLat = Math.cos((boundedLat * Math.PI) / 180);
+  const lonScale = 111.32 * Math.max(0.1, Math.abs(cosLat));
+  const lonDelta = radiusKm / lonScale;
+
+  return {
+    west: Math.max(-180, lon - lonDelta),
+    south: Math.max(-85, boundedLat - latDelta),
+    east: Math.min(180, lon + lonDelta),
+    north: Math.min(85, boundedLat + latDelta),
+  };
+};
 
 export const OfflineMapsPanel = ({
   drawActive = false,
@@ -39,13 +72,15 @@ export const OfflineMapsPanel = ({
   onCapturePreview,
   onBudgetBBoxChange
 }: OfflineMapsPanelProps) => {
-  const [region, setRegion] = useState<'asia' | 'custom'>('asia');
-  const [bbox, setBbox] = useState({
-    west: '25.0',
-    south: '-10.0',
-    east: '180.0',
-    north: '82.0'
-  });
+  const [region, setRegion] = useState<RegionOption>('asia');
+  const [bbox, setBbox] = useState(DEFAULT_ASIA_BBOX);
+  const [bboxError, setBboxError] = useState<string | null>(null);
+  const [locationQuery, setLocationQuery] = useState('');
+  const [locationResults, setLocationResults] = useState<LocationSearchResult[]>([]);
+  const [selectedLocation, setSelectedLocation] = useState<LocationSearchResult | null>(null);
+  const [locationSearchLoading, setLocationSearchLoading] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [radiusKm, setRadiusKm] = useState('25');
   const [minZoom, setMinZoom] = useState(0);
   const [maxZoom, setMaxZoom] = useState(12);
   const [syncZoom, setSyncZoom] = useState(false);
@@ -61,8 +96,9 @@ export const OfflineMapsPanel = ({
   const [estimate, setEstimate] = useState<number | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [budgetEstimate, setBudgetEstimate] = useState<number | null>(null);
-  const [budgetBBoxLocal, setBudgetBBoxLocal] = useState<{ west: number; south: number; east: number; north: number } | null>(null);
+  const [budgetBBoxLocal, setBudgetBBoxLocal] = useState<BBox | null>(null);
   const [status, setStatus] = useState<any>(null);
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const [visualDbStatus, setVisualDbStatus] = useState<any>(null);
   const [visualDbBusy, setVisualDbBusy] = useState(false);
   const [visualDbMessage, setVisualDbMessage] = useState<string | null>(null);
@@ -72,13 +108,61 @@ export const OfflineMapsPanel = ({
   useEffect(() => {
     if (!externalBBox) return;
     setBbox({
-      west: String(externalBBox.west),
-      south: String(externalBBox.south),
-      east: String(externalBBox.east),
-      north: String(externalBBox.north),
+      west: formatCoord(externalBBox.west),
+      south: formatCoord(externalBBox.south),
+      east: formatCoord(externalBBox.east),
+      north: formatCoord(externalBBox.north),
     });
     setRegion('custom');
   }, [externalBBox]);
+
+  useEffect(() => {
+    const trimmedQuery = locationQuery.trim();
+    if (trimmedQuery.length < 3) {
+      setLocationResults([]);
+      setLocationSearchLoading(false);
+      if (!trimmedQuery) {
+        setSelectedLocation(null);
+        setLocationError(null);
+      }
+      return;
+    }
+    if (selectedLocation && trimmedQuery === selectedLocation.display_name) {
+      setLocationResults([]);
+      setLocationSearchLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLocationSearchLoading(true);
+      setLocationError(null);
+      try {
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(trimmedQuery)}`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) {
+          throw new Error(`Location search failed (${res.status})`);
+        }
+        const data = (await res.json()) as LocationSearchResult[];
+        setLocationResults(Array.isArray(data) ? data : []);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setLocationResults([]);
+        setLocationError(error instanceof Error ? error.message : 'Location search failed');
+      } finally {
+        if (!controller.signal.aborted) {
+          setLocationSearchLoading(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [locationQuery, selectedLocation]);
 
   useEffect(() => {
     if (storageBudgetInput !== String(storageBudget)) {
@@ -124,6 +208,8 @@ export const OfflineMapsPanel = ({
     () => Object.entries(mapTypes).filter(([, v]) => v).map(([k]) => k),
     [mapTypes]
   );
+  const isDownloading = status?.state === 'running' && !status?.stopped;
+  const isCanceling = status?.state === 'running' && Boolean(status?.stopped);
 
   const effectiveBBox = useMemo(() => {
     if (region !== 'custom') return undefined;
@@ -192,7 +278,7 @@ export const OfflineMapsPanel = ({
   const AVG_TILE_BYTES = 50 * 1024;
   const estimatedSizeGb = estimate !== null ? (estimate * AVG_TILE_BYTES) / (1024 ** 3) : null;
 
-  const estimateTilesForBBox = async (targetBBox: { west: number; south: number; east: number; north: number }) => {
+  const estimateTilesForBBox = async (targetBBox: BBox) => {
     if (!mapTypeList.length) return 0;
     const res = await fetch(`${apiBase}/tiles/estimate`, {
       method: 'POST',
@@ -209,7 +295,7 @@ export const OfflineMapsPanel = ({
   };
 
   const shrinkBBox = (
-    target: { west: number; south: number; east: number; north: number },
+    target: BBox,
     factor: number
   ) => {
     const centerLon = (target.west + target.east) / 2;
@@ -248,6 +334,61 @@ export const OfflineMapsPanel = ({
     void adjust();
   }, [externalBBox, mapTypeList, maxTilesBudget, maxZoom, minZoom, onBudgetBBoxChange, region]);
 
+  const applyBBoxSelection = (nextBBox: BBox) => {
+    setRegion('custom');
+    setBbox({
+      west: formatCoord(nextBBox.west),
+      south: formatCoord(nextBBox.south),
+      east: formatCoord(nextBBox.east),
+      north: formatCoord(nextBBox.north),
+    });
+    setBboxError(null);
+    setBudgetBBoxLocal(null);
+    onBudgetBBoxChange?.(null);
+    onBBoxChange?.(nextBBox);
+    onDrawActiveChange?.(false);
+  };
+
+  const parseEnteredBBox = (): BBox | null => {
+    const parsed = {
+      west: Number(bbox.west),
+      south: Number(bbox.south),
+      east: Number(bbox.east),
+      north: Number(bbox.north),
+    };
+    if (!Object.values(parsed).every((value) => Number.isFinite(value))) {
+      setBboxError('Enter valid numeric bbox coordinates.');
+      return null;
+    }
+    if (parsed.west >= parsed.east || parsed.south >= parsed.north) {
+      setBboxError('BBox must keep west < east and south < north.');
+      return null;
+    }
+    return parsed;
+  };
+
+  const handleApplyEnteredBBox = () => {
+    const parsed = parseEnteredBBox();
+    if (!parsed) return;
+    applyBBoxSelection(parsed);
+  };
+
+  const handleApplyRadiusBBox = () => {
+    if (!selectedLocation) {
+      setLocationError('Pick a search result first.');
+      return;
+    }
+    const lat = Number(selectedLocation.lat);
+    const lon = Number(selectedLocation.lon);
+    const radius = Number(radiusKm);
+    if (![lat, lon, radius].every((value) => Number.isFinite(value)) || radius <= 0) {
+      setLocationError('Enter a valid radius in kilometers.');
+      return;
+    }
+    setLocationError(null);
+    applyBBoxSelection(buildBBoxFromCenterAndRadius(lon, lat, radius));
+  };
+
   const handleEstimate = async () => {
     setEstimateError(null);
     try {
@@ -270,15 +411,51 @@ export const OfflineMapsPanel = ({
   };
 
   const handleDownload = async () => {
-    await fetch(`${apiBase}/tiles/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    setDownloadMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/tiles/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDownloadMessage(`Download failed (${res.status})`);
+        return;
+      }
+      if (data.status === 'already_running') {
+        setDownloadMessage('A tile download is already running.');
+        return;
+      }
+      setStatus((current: any) => ({
+        ...(current || {}),
+        state: 'running',
+        stopped: false,
+        error: null,
+      }));
+      setDownloadMessage('Tile download started.');
+    } catch {
+      setDownloadMessage('Download failed (network).');
+    }
   };
 
   const handleCancel = async () => {
-    await fetch(`${apiBase}/tiles/cancel`, { method: 'POST' });
+    setDownloadMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/tiles/cancel`, { method: 'POST' });
+      if (!res.ok) {
+        setDownloadMessage(`Cancel failed (${res.status})`);
+        return;
+      }
+      setStatus((current: any) => ({
+        ...(current || {}),
+        state: current?.state === 'running' ? 'running' : 'stopping',
+        stopped: true,
+      }));
+      setDownloadMessage('Stopping tile download...');
+    } catch {
+      setDownloadMessage('Cancel failed (network).');
+    }
   };
 
   const handleBuildVisualDb = async () => {
@@ -322,6 +499,8 @@ export const OfflineMapsPanel = ({
     onBBoxChange?.(null);
     setBudgetBBoxLocal(null);
     onBudgetBBoxChange?.(null);
+    setBboxError(null);
+    setLocationError(null);
   };
 
   const handleCapture = (which: 'min' | 'max') => {
@@ -346,7 +525,7 @@ export const OfflineMapsPanel = ({
         <div className="p-3 space-y-4">
           <div className="rounded-lg border border-border/60 bg-background/60 p-3 space-y-2">
             <SectionLabel>Region</SectionLabel>
-            <Select defaultValue="asia" onValueChange={(v) => setRegion(v as 'asia' | 'custom')}>
+            <Select value={region} onValueChange={(value) => setRegion(value as RegionOption)}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -355,20 +534,83 @@ export const OfflineMapsPanel = ({
                 <SelectItem value="custom">Custom BBox</SelectItem>
               </SelectContent>
             </Select>
+            <div className="space-y-2 rounded-md border border-border/60 bg-background/70 p-2">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Location Search</div>
+              <Input
+                className="h-8"
+                value={locationQuery}
+                onChange={(e) => {
+                  setLocationQuery(e.target.value);
+                  setSelectedLocation(null);
+                }}
+                placeholder="Search city, place, or address"
+              />
+              <div className="flex items-center gap-2">
+                <Input
+                  className="h-8"
+                  value={radiusKm}
+                  onChange={(e) => setRadiusKm(e.target.value)}
+                  placeholder="Radius (km)"
+                />
+                <Button type="button" variant="outline" className="h-8 shrink-0" onClick={handleApplyRadiusBBox}>
+                  Use Radius
+                </Button>
+              </div>
+              {selectedLocation && (
+                <div className="text-[10px] text-muted-foreground">
+                  Center: {selectedLocation.display_name}
+                </div>
+              )}
+              {locationSearchLoading && (
+                <div className="text-[10px] text-muted-foreground">Searching locations...</div>
+              )}
+              {!locationSearchLoading && locationResults.length > 0 && (
+                <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-border/60 bg-background/60 p-1">
+                  {locationResults.map((result) => (
+                    <button
+                      key={result.place_id}
+                      type="button"
+                      className="w-full rounded-sm px-2 py-1 text-left text-[11px] text-foreground transition hover:bg-accent hover:text-accent-foreground"
+                      onClick={() => {
+                        setSelectedLocation(result);
+                        setLocationQuery(result.display_name);
+                        setLocationResults([]);
+                        setLocationError(null);
+                        setRegion('custom');
+                      }}
+                    >
+                      {result.display_name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {locationError && (
+                <div className="text-[10px] text-destructive">{locationError}</div>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <Input className="h-8" value={bbox.west} onChange={(e) => setBbox(prev => ({ ...prev, west: e.target.value }))} placeholder="West (lon)" />
               <Input className="h-8" value={bbox.south} onChange={(e) => setBbox(prev => ({ ...prev, south: e.target.value }))} placeholder="South (lat)" />
               <Input className="h-8" value={bbox.east} onChange={(e) => setBbox(prev => ({ ...prev, east: e.target.value }))} placeholder="East (lon)" />
               <Input className="h-8" value={bbox.north} onChange={(e) => setBbox(prev => ({ ...prev, north: e.target.value }))} placeholder="North (lat)" />
             </div>
-            <div className="flex items-center gap-2">
-              <Button className="flex-1" onClick={() => onDrawActiveChange?.(!drawActive)}>
+            <div className="grid grid-cols-2 gap-2">
+              <Button className="w-full" onClick={() => onDrawActiveChange?.(!drawActive)}>
                 {drawActive ? 'Drawing…' : 'Draw BBox'}
               </Button>
-              <Button variant="outline" className="flex-1" onClick={handleClearSelection}>
+              <Button type="button" variant="outline" className="w-full" onClick={handleApplyEnteredBBox}>
+                Apply BBox
+              </Button>
+              <Button type="button" variant="outline" className="w-full" onClick={handleApplyRadiusBBox}>
+                Radius to BBox
+              </Button>
+              <Button variant="outline" className="w-full" onClick={handleClearSelection}>
                 Clear Selection
               </Button>
             </div>
+            {bboxError && (
+              <div className="text-[10px] text-destructive">{bboxError}</div>
+            )}
           </div>
 
           <div className="rounded-lg border border-border/60 bg-background/60 p-3 space-y-3">
@@ -497,7 +739,7 @@ export const OfflineMapsPanel = ({
           <div className="rounded-lg border border-border/60 bg-background/60 p-3 space-y-3">
             <SectionLabel>Cache Controls</SectionLabel>
             <ControlRow label="Provider">
-              <Select defaultValue="osm" onValueChange={setProvider}>
+              <Select value={provider} onValueChange={setProvider}>
                 <SelectTrigger className="h-8 w-[140px] text-xs">
                   <SelectValue />
                 </SelectTrigger>
@@ -509,13 +751,27 @@ export const OfflineMapsPanel = ({
               </Select>
             </ControlRow>
             <div className="flex items-center gap-2">
-              <Button className="flex-1" onClick={handleEstimate}>Estimate Size</Button>
-              <Button variant="outline" className="flex-1" onClick={handleDownload}>Download Tiles</Button>
+              <Button className="flex-1" onClick={handleEstimate} disabled={isDownloading || isCanceling}>
+                Estimate Size
+              </Button>
+              <Button variant="outline" className="flex-1" onClick={handleDownload} disabled={isDownloading || isCanceling}>
+                {isDownloading || isCanceling ? 'Downloading...' : 'Download Tiles'}
+              </Button>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" className="flex-1" onClick={handleCancel}>Cancel</Button>
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={handleCancel}
+                disabled={!isDownloading || isCanceling}
+              >
+                {isCanceling ? 'Canceling...' : 'Cancel Download'}
+              </Button>
               <Button variant="destructive" className="flex-1">Clear Cache</Button>
             </div>
+            {downloadMessage && (
+              <div className="text-[11px] text-muted-foreground">{downloadMessage}</div>
+            )}
             <div className="rounded-md border border-border/60 bg-background/70 p-2 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Visual Localization DB</div>
@@ -541,6 +797,7 @@ export const OfflineMapsPanel = ({
             {estimateError && <div>Estimate error: {estimateError}</div>}
             <div>Queue: {status?.state ?? 'idle'} • Progress: {status?.progress ?? 0}%</div>
             <div>Downloaded: {status?.downloaded ?? 0} / {status?.total ?? 0}</div>
+            {isCanceling && <div>Cancel requested. Waiting for the current tile fetch to stop.</div>}
           </div>
         </div>
       </ScrollArea>

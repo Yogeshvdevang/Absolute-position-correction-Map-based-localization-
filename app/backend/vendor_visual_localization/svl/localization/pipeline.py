@@ -118,6 +118,9 @@ class Pipeline(BasePipeline):
         matched_confidence = None
         matched_valid = None
         matched_inliers = None
+        viz_drone_image = drone_image.image.copy()
+        viz_satellite_image = None
+        match_visualization = None
 
         drone_image.key_points = self.detector.detect_and_describe_keypoints(
             drone_image.image
@@ -196,27 +199,28 @@ class Pipeline(BasePipeline):
             distance = haversine_distance(gt_coordinates, predicted_coordinates)
             is_match = True
             color = cm.jet(matched_confidence[matched_valid])
+            out = make_matching_plot_fast(
+                image0=viz_drone_image,
+                image1=viz_satellite_image,
+                kpts0=drone_image.key_points.keypoints,
+                kpts1=matched_image.key_points.keypoints,
+                mkpts0=matched_kpts0,
+                mkpts1=matched_kpts1,
+                color=color,
+                text="",
+                path=None,
+                show_keypoints=True,
+                small_text=[
+                    f"GT: {gt_coordinates}",
+                    f"Pred: {predicted_coordinates}",
+                ],
+            )
+            match_visualization = out
             if output_path:
                 output_path = (
                     Path(output_path) if isinstance(output_path, str) else output_path
                 )
                 viz_path = output_path / f"{drone_image.name}_viz.jpg"
-                out = make_matching_plot_fast(
-                    image0=viz_drone_image,
-                    image1=viz_satellite_image,
-                    kpts0=drone_image.key_points.keypoints,
-                    kpts1=matched_image.key_points.keypoints,
-                    mkpts0=matched_kpts0,
-                    mkpts1=matched_kpts1,
-                    color=color,
-                    text="",
-                    path=None,
-                    show_keypoints=True,
-                    small_text=[
-                        f"GT: {gt_coordinates}",
-                        f"Pred: {predicted_coordinates}",
-                    ],
-                )
                 self.save_viz(out, viz_path)
             self.logger.info(
                 f"Predicted coordinates: {predicted_coordinates}, GT coordinates: {gt_coordinates}"
@@ -234,6 +238,9 @@ class Pipeline(BasePipeline):
             "num_inliers": matched_inliers,
             "matched_image": matched_image,
             "distance": distance * 1000 if distance else None,
+            "query_preview": viz_drone_image,
+            "reference_preview": viz_satellite_image,
+            "match_visualization": match_visualization,
         }
 
     def run(self, output_path: Union[str, Path] = None) -> List[Dict[str, Any]]:
