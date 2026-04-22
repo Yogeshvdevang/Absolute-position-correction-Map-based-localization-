@@ -92,6 +92,8 @@ const CAMERA_VIEW_TITLES: Record<CameraViewKey, string> = {
   left: 'Left Facing Drone Cam',
   right: 'Right Facing Drone Cam',
 };
+const FRONT_CAMERA_TILT_STORAGE_KEY = 'chaox.droneSim.frontCameraTiltDeg';
+const DEFAULT_FRONT_CAMERA_TILT_DEG = -5;
 const CAMERA_FRUSTUM_DISTANCE = 12;
 
 const createFrustumHelper = (camera: THREE.PerspectiveCamera, distance = CAMERA_FRUSTUM_DISTANCE) => {
@@ -183,6 +185,16 @@ const RC_PROFILES: Array<{
 export const DroneSimView = () => {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [bottomFov, setBottomFov] = useState(120);
+  const [frontCameraTiltDeg, setFrontCameraTiltDeg] = useState(() => {
+    const raw = localStorage.getItem(FRONT_CAMERA_TILT_STORAGE_KEY);
+    const parsed = raw !== null ? Number(raw) : DEFAULT_FRONT_CAMERA_TILT_DEG;
+    return Number.isFinite(parsed) ? parsed : DEFAULT_FRONT_CAMERA_TILT_DEG;
+  });
+  const [frontCameraTiltSavedDeg, setFrontCameraTiltSavedDeg] = useState(() => {
+    const raw = localStorage.getItem(FRONT_CAMERA_TILT_STORAGE_KEY);
+    const parsed = raw !== null ? Number(raw) : DEFAULT_FRONT_CAMERA_TILT_DEG;
+    return Number.isFinite(parsed) ? parsed : DEFAULT_FRONT_CAMERA_TILT_DEG;
+  });
   const [cameraViews, setCameraViews] = useState<Record<CameraViewKey, boolean>>({
     bottom: true,
     bottomClean: true,
@@ -264,8 +276,8 @@ export const DroneSimView = () => {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const streamRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const bottomFovHelperRef = useRef<THREE.LineSegments | null>(null);
-  const bottomFovHelperUpdateRef = useRef<(() => void) | null>(null);
+  const cameraFovHelpersRef = useRef<Partial<Record<'bottom' | 'front', THREE.LineSegments>>>({});
+  const cameraFovHelperUpdatesRef = useRef<Partial<Record<'bottom' | 'front', () => void>>>({});
   const droneCameraRefs = useRef<Record<CameraViewKey, THREE.PerspectiveCamera | null>>({
     bottom: null,
     bottomClean: null,
@@ -606,7 +618,18 @@ export const DroneSimView = () => {
       camera.fov = next;
       camera.updateProjectionMatrix();
     });
-    bottomFovHelperRef.current?.update();
+    cameraFovHelperUpdatesRef.current.bottom?.();
+    cameraFovHelperUpdatesRef.current.front?.();
+  };
+
+  const handleFrontCameraTiltChange = (value: number) => {
+    const next = Math.max(-80, Math.min(80, value));
+    setFrontCameraTiltDeg(next);
+  };
+
+  const handleSaveFrontCameraTilt = () => {
+    localStorage.setItem(FRONT_CAMERA_TILT_STORAGE_KEY, String(frontCameraTiltDeg));
+    setFrontCameraTiltSavedDeg(frontCameraTiltDeg);
   };
 
   const toggleCameraView = (view: CameraViewKey) => {
@@ -982,6 +1005,14 @@ export const DroneSimView = () => {
   }, [cameraViews]);
 
   useEffect(() => {
+    const frontCamera = droneCameraRefs.current.front;
+    if (!frontCamera) return;
+    frontCamera.rotation.set(THREE.MathUtils.degToRad(frontCameraTiltDeg), Math.PI, 0);
+    frontCamera.updateProjectionMatrix();
+    cameraFovHelperUpdatesRef.current.front?.();
+  }, [frontCameraTiltDeg]);
+
+  useEffect(() => {
     axisReverseRef.current = axisReverse;
   }, [axisReverse]);
 
@@ -1338,8 +1369,10 @@ export const DroneSimView = () => {
 
     const frontCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
     frontCamera.position.set(0, 0.15, 0.7);
-    frontCamera.rotation.x = -0.08;
+    frontCamera.rotation.set(THREE.MathUtils.degToRad(frontCameraTiltDeg), Math.PI, 0);
     state.droneGroup.add(frontCamera);
+    const { helper: frontFovHelper, update: updateFrontFovHelper } = createFrustumHelper(frontCamera);
+    scene.add(frontFovHelper);
 
     const leftCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
     leftCamera.position.set(-0.7, 0.1, 0);
@@ -1650,12 +1683,13 @@ export const DroneSimView = () => {
       });
       const viewportWidth = viewport.clientWidth || 1;
       const viewportHeight = viewport.clientHeight || 1;
-      const fovHelper = bottomFovHelperRef.current;
-      if (fovHelper && bottomFovHelperUpdateRef.current) {
-        state.droneGroup?.updateMatrixWorld(true);
-        bottomFovHelperUpdateRef.current();
-        fovHelper.visible = true;
-      }
+      state.droneGroup?.updateMatrixWorld(true);
+      const bottomFovHelper = cameraFovHelpersRef.current.bottom ?? null;
+      const frontFovHelper = cameraFovHelpersRef.current.front ?? null;
+      cameraFovHelperUpdatesRef.current.bottom?.();
+      cameraFovHelperUpdatesRef.current.front?.();
+      if (bottomFovHelper) bottomFovHelper.visible = cameraViewStateRef.current.bottom || cameraViewStateRef.current.bottomClean;
+      if (frontFovHelper) frontFovHelper.visible = cameraViewStateRef.current.front;
 
       renderer.setScissorTest(true);
       renderer.setViewport(0, 0, viewportWidth, viewportHeight);
@@ -1686,11 +1720,17 @@ export const DroneSimView = () => {
           if (state.pathLine) state.pathLine.visible = false;
           if (state.trailLine) state.trailLine.visible = false;
         }
-        const hideFovHelper = view === 'bottom' || view === 'bottomClean';
-        const prevFovHelperVisible = fovHelper?.visible ?? false;
-        if (fovHelper && hideFovHelper) fovHelper.visible = false;
+        const prevBottomFovVisible = bottomFovHelper?.visible ?? false;
+        const prevFrontFovVisible = frontFovHelper?.visible ?? false;
+        if (view === 'bottom' || view === 'bottomClean') {
+          if (bottomFovHelper) bottomFovHelper.visible = false;
+        }
+        if (view === 'front') {
+          if (frontFovHelper) frontFovHelper.visible = false;
+        }
         renderer.render(scene, cam);
-        if (fovHelper && hideFovHelper) fovHelper.visible = prevFovHelperVisible;
+        if (bottomFovHelper) bottomFovHelper.visible = prevBottomFovVisible;
+        if (frontFovHelper) frontFovHelper.visible = prevFrontFovVisible;
         if (hideTrace) {
           if (state.pathLine) state.pathLine.visible = prevPathVisible;
           if (state.trailLine) state.trailLine.visible = prevTrailVisible;
@@ -1709,14 +1749,17 @@ export const DroneSimView = () => {
         const prevTrailVisible = state.trailLine?.visible ?? true;
         if (state.pathLine) state.pathLine.visible = false;
         if (state.trailLine) state.trailLine.visible = false;
-        const prevFovHelperVisible = fovHelper?.visible ?? false;
-        if (fovHelper) fovHelper.visible = false;
+        const prevBottomFovVisible = bottomFovHelper?.visible ?? false;
+        const prevFrontFovVisible = frontFovHelper?.visible ?? false;
+        if (bottomFovHelper) bottomFovHelper.visible = false;
+        if (frontFovHelper) frontFovHelper.visible = false;
         cleanCamera.aspect = INSET.width / INSET.height;
         cleanCamera.updateProjectionMatrix();
         streamRenderer.setViewport(0, 0, INSET.width, INSET.height);
         streamRenderer.setScissorTest(false);
         streamRenderer.render(scene, cleanCamera);
-        if (fovHelper) fovHelper.visible = prevFovHelperVisible;
+        if (bottomFovHelper) bottomFovHelper.visible = prevBottomFovVisible;
+        if (frontFovHelper) frontFovHelper.visible = prevFrontFovVisible;
         if (state.pathLine) state.pathLine.visible = prevPathVisible;
         if (state.trailLine) state.trailLine.visible = prevTrailVisible;
         try {
@@ -1803,8 +1846,14 @@ export const DroneSimView = () => {
       left: leftCamera,
       right: rightCamera,
     };
-    bottomFovHelperRef.current = bottomFovHelper;
-    bottomFovHelperUpdateRef.current = updateBottomFovHelper;
+    cameraFovHelpersRef.current = {
+      bottom: bottomFovHelper,
+      front: frontFovHelper,
+    };
+    cameraFovHelperUpdatesRef.current = {
+      bottom: updateBottomFovHelper,
+      front: updateFrontFovHelper,
+    };
     sceneRef.current = scene;
     controlsRef.current = controls;
 
@@ -1815,12 +1864,13 @@ export const DroneSimView = () => {
       if (animRef.current) cancelAnimationFrame(animRef.current);
       telemetryWsRef.current?.close();
       cameraWsRef.current?.close();
-      if (bottomFovHelperRef.current) {
-        bottomFovHelperRef.current.geometry.dispose();
-        (bottomFovHelperRef.current.material as THREE.Material).dispose();
-        bottomFovHelperRef.current = null;
-      }
-      bottomFovHelperUpdateRef.current = null;
+      Object.values(cameraFovHelpersRef.current).forEach((helper) => {
+        if (!helper) return;
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+      });
+      cameraFovHelpersRef.current = {};
+      cameraFovHelperUpdatesRef.current = {};
       controls.dispose();
       renderer.dispose();
       streamRenderer.dispose();
@@ -1975,6 +2025,28 @@ export const DroneSimView = () => {
                 onChange={(e) => handleBottomFovChange(Number(e.target.value))}
               />
               <div className="drone-sim__range-value">{bottomFov} deg</div>
+            </div>
+          </div>
+          <div className="input-group">
+            <label>Front Camera Tilt</label>
+            <div className="drone-sim__range-row">
+              <input
+                type="range"
+                min={-80}
+                max={80}
+                step={1}
+                value={frontCameraTiltDeg}
+                onChange={(e) => handleFrontCameraTiltChange(Number(e.target.value))}
+              />
+              <div className="drone-sim__range-value">{frontCameraTiltDeg} deg</div>
+            </div>
+            <div className="drone-sim__ws-actions" style={{ marginTop: 8 }}>
+              <button type="button" className="drone-sim__ws-btn" onClick={handleSaveFrontCameraTilt}>
+                Save Front Tilt
+              </button>
+            </div>
+            <div className="drone-sim__manual-hint">
+              Saved front tilt: {frontCameraTiltSavedDeg} deg
             </div>
           </div>
           <div className="input-group">
