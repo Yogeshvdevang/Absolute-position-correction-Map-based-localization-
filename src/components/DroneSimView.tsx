@@ -70,7 +70,7 @@ const MISSION_PRESETS: MissionPreset[] = [
   },
   {
     id: 'dsu-main',
-    label: 'DSU Main Campus',
+    label: 'Harohalli Campus',
     lat: 12.6606692,
     lon: 77.4508399,
     radiusM: 260
@@ -914,14 +914,40 @@ export const DroneSimView = () => {
     loadGroundMap(lat, lon, mapSourceRef.current, zoom);
   };
 
-  const computeZoomForAlt = (alt: number) => {
+  const computeZoomForAlt = useCallback((alt: number) => {
     const minZoom = mapZoomMinRef.current;
     const maxZoom = mapZoomMaxRef.current;
     const baseAlt = Math.max(10, stateRef.current.refAlt || getNumber(startAltRef, 50) || 50);
     const ratio = Math.max(1, alt) / baseAlt;
     const raw = maxZoom - Math.log2(ratio);
     return Math.max(minZoom, Math.min(maxZoom, raw));
-  };
+  }, [getNumber]);
+
+  const tileExistsForPreset = useCallback(async (preset: MissionPreset, source: GroundSource, zoom: number) => {
+    const latRad = (preset.lat * Math.PI) / 180;
+    const n = 2 ** zoom;
+    const tileX = Math.floor(((preset.lon + 180) / 360) * n);
+    const tileY = Math.floor(
+      ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
+    );
+    try {
+      const response = await fetch(`${API_BASE}/tiles/${source}/${zoom}/${tileX}/${tileY}.png`, {
+        cache: 'no-store',
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const findBestOfflinePreset = useCallback(async (source: GroundSource, zoom: number) => {
+    for (const preset of MISSION_PRESETS) {
+      if (await tileExistsForPreset(preset, source, zoom)) {
+        return preset;
+      }
+    }
+    return null;
+  }, [tileExistsForPreset]);
 
   const loadGroundMap = useCallback((lat: number, lon: number, sourceOverride?: GroundSource, zoomOverride?: number) => {
     const state = stateRef.current;
@@ -974,25 +1000,41 @@ export const DroneSimView = () => {
 
     const requestId = ++groundLoadIdRef.current;
     let loadedCount = 0;
+    let offlineLoadedCount = 0;
+    let onlineLoadedCount = 0;
     const totalTiles = grid * grid;
     const osmHosts = ['https://a.tile.openstreetmap.org', 'https://b.tile.openstreetmap.org', 'https://c.tile.openstreetmap.org'];
-    const loadTile = (tx: number, ty: number) => new Promise<void>((resolve) => {
+    const loadTileImage = (url: string) => new Promise<HTMLImageElement | null>((resolve) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.decoding = 'async';
-      img.onload = () => {
-        const dx = (tx - centerX + half) * tileSize;
-        const dy = (ty - centerY + half) * tileSize;
-        ctx.drawImage(img, dx, dy, tileSize, tileSize);
-        loadedCount += 1;
-        resolve();
-      };
-      img.onerror = () => resolve();
-      const url = source === 'satellite'
-        ? `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${zoom}/${ty}/${tx}`
-        : `${osmHosts[Math.abs(tx + ty) % osmHosts.length]}/${zoom}/${tx}/${ty}.png`;
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
       img.src = url;
     });
+    const loadTile = async (tx: number, ty: number) => {
+      const dx = (tx - centerX + half) * tileSize;
+      const dy = (ty - centerY + half) * tileSize;
+      const offlineUrl = `${API_BASE}/tiles/${source}/${zoom}/${tx}/${ty}.png`;
+      const onlineUrl = source === 'satellite'
+        ? `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${zoom}/${ty}/${tx}`
+        : `${osmHosts[Math.abs(tx + ty) % osmHosts.length]}/${zoom}/${tx}/${ty}.png`;
+
+      const offlineImage = await loadTileImage(offlineUrl);
+      if (offlineImage) {
+        ctx.drawImage(offlineImage, dx, dy, tileSize, tileSize);
+        loadedCount += 1;
+        offlineLoadedCount += 1;
+        return;
+      }
+
+      const onlineImage = await loadTileImage(onlineUrl);
+      if (onlineImage) {
+        ctx.drawImage(onlineImage, dx, dy, tileSize, tileSize);
+        loadedCount += 1;
+        onlineLoadedCount += 1;
+      }
+    };
 
     const loads: Promise<void>[] = [];
     for (let dy = -half; dy <= half; dy += 1) {
@@ -1037,6 +1079,12 @@ export const DroneSimView = () => {
       } else {
         setMapStatus(
           `Map tiles: ${loadedCount}/${totalTiles} loaded (z${zoom}) • ${source} @ ${lat.toFixed(5)}, ${lon.toFixed(5)}.`
+        );
+      }
+
+      if (loadedCount > 0) {
+        setMapStatus(
+          `Map tiles: ${loadedCount}/${totalTiles} loaded (z${zoom}) • offline ${offlineLoadedCount}, online ${onlineLoadedCount} • ${source} @ ${lat.toFixed(5)}, ${lon.toFixed(5)}.`
         );
       }
 
@@ -1146,8 +1194,33 @@ export const DroneSimView = () => {
   };
 
   useEffect(() => {
-    applyMissionPreset(DEFAULT_PRESET.id);
-  }, [applyMissionPreset]);
+    let active = true;
+
+    const bootstrapPreset = async () => {
+      const startupAlt = stateRef.current.refAlt || getNumber(startAltRef, 50) || 50;
+      const startupZoom = computeZoomForAlt(startupAlt);
+      const currentSource = mapSourceRef.current;
+      const cachedPreset = await findBestOfflinePreset(currentSource, startupZoom);
+      if (!active) return;
+
+      const nextPreset = cachedPreset ?? DEFAULT_PRESET;
+      setMissionPresetId(nextPreset.id);
+      applyMissionPreset(nextPreset.id);
+
+      if (statusRef.current && cachedPreset) {
+        statusRef.current.textContent = `${cachedPreset.label} offline cache ready`;
+        statusRef.current.style.color = '#4ade80';
+      }
+      if (cachedPreset) {
+        setMapStatus(`Map tiles: auto-selected offline preset ${cachedPreset.label} (z${startupZoom}).`);
+      }
+    };
+
+    void bootstrapPreset();
+    return () => {
+      active = false;
+    };
+  }, [applyMissionPreset, computeZoomForAlt, findBestOfflinePreset, getNumber]);
 
   useEffect(() => {
     manualInputModeRef.current = manualInputMode;

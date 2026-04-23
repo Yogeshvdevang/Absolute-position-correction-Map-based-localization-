@@ -12,7 +12,7 @@ import uvicorn
 import websockets
 import cv2
 import numpy as np
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
@@ -1272,11 +1272,11 @@ async def get_tile(map_type: str, z: int, x: int, y: str):
   try:
     y_int = int(y.split(".")[0])
   except ValueError:
-    return {"error": "invalid tile"}, 400
+    raise HTTPException(status_code=400, detail="invalid tile")
   path = TILE_CACHE_DIR / map_type / str(z) / str(x) / f"{y_int}.png"
   if path.exists():
     return FileResponse(path)
-  return {"error": "tile not found"}, 404
+  raise HTTPException(status_code=404, detail="tile not found")
 
 
 @app.get("/benchmark/methods")

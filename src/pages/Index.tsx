@@ -262,17 +262,19 @@ const Index = () => {
             />
           </div>
 
-          <div className="pointer-events-none absolute right-4 top-20 z-50 flex flex-col items-end">
-            <Button
-              type="button"
-              onClick={handleNavsarToggle}
-              className="pointer-events-auto"
-              variant={isNavisarPanel ? 'secondary' : 'default'}
-              title="Toggle the bundled NAVISAR project view"
-            >
-              {isNavisarPanel ? 'Back to This Page' : 'Open NAVSAR Project'}
-            </Button>
-          </div>
+          {!isApcPanel && (
+            <div className="pointer-events-none absolute right-4 top-20 z-50 flex flex-col items-end">
+              <Button
+                type="button"
+                onClick={handleNavsarToggle}
+                className="pointer-events-auto"
+                variant={isNavisarPanel ? 'secondary' : 'default'}
+                title="Toggle the bundled NAVISAR project view"
+              >
+                {isNavisarPanel ? 'Back to This Page' : 'Open NAVSAR Project'}
+              </Button>
+            </div>
+          )}
           
           {showLeftPanel && (
             <div className="w-72 flex-shrink-0">
