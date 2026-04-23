@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import '@/styles/drone-sim.css';
@@ -54,6 +54,9 @@ type AxisCalibration = { min: number; center: number; max: number };
 type CameraViewKey = 'bottom' | 'bottomClean' | 'front' | 'left' | 'right';
 
 const INSET = { width: 240, height: 160, margin: 16 };
+const CAMERA_INSET_ASPECT_RATIO = INSET.width / INSET.height;
+const CAMERA_INSET_MIN_WIDTH = 160;
+const CAMERA_INSET_STORAGE_KEY = 'chaox.droneSim.cameraInsetWidth';
 const CAMERA_STREAM_TARGET_FPS = 120;
 const CAMERA_STREAM_INTERVAL_MS = 1000 / CAMERA_STREAM_TARGET_FPS;
 const MAP_TILE = { tileSize: 256, grid: 3 };
@@ -99,6 +102,36 @@ const DEFAULT_FRONT_CAMERA_TILT_DEG = -5;
 const DEFAULT_LEFT_CAMERA_TILT_DEG = 0;
 const DEFAULT_RIGHT_CAMERA_TILT_DEG = 0;
 const CAMERA_FRUSTUM_DISTANCE = 12;
+
+const clampNumber = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const getCameraInsetGrid = (activeCount: number) => {
+  const columns = activeCount > 1 ? 2 : 1;
+  const rows = Math.ceil(activeCount / columns);
+  return { columns, rows };
+};
+
+const getMaxCameraInsetWidth = (viewportWidth: number, viewportHeight: number, activeCount: number) => {
+  const { columns, rows } = getCameraInsetGrid(Math.max(activeCount, 1));
+  const maxWidthByColumns = Math.floor((viewportWidth - INSET.margin * (columns + 1)) / columns);
+  const maxHeight = Math.floor((viewportHeight - INSET.margin * (rows + 1)) / Math.max(rows, 1));
+  const maxWidthByRows = Math.floor(maxHeight * CAMERA_INSET_ASPECT_RATIO);
+  return Math.max(1, Math.min(maxWidthByColumns, maxWidthByRows));
+};
+
+const getCameraInsetLayout = (
+  viewportWidth: number,
+  viewportHeight: number,
+  activeCount: number,
+  preferredWidth: number,
+) => {
+  const { columns, rows } = getCameraInsetGrid(Math.max(activeCount, 1));
+  const maxWidth = getMaxCameraInsetWidth(viewportWidth, viewportHeight, activeCount);
+  const minWidth = Math.min(CAMERA_INSET_MIN_WIDTH, maxWidth);
+  const width = clampNumber(Math.round(preferredWidth), minWidth, maxWidth);
+  const height = Math.max(1, Math.round(width / CAMERA_INSET_ASPECT_RATIO));
+  return { columns, rows, width, height };
+};
 
 const createFrustumHelper = (camera: THREE.PerspectiveCamera, distance = CAMERA_FRUSTUM_DISTANCE) => {
   const corners = Array.from({ length: 4 }, () => new THREE.Vector3());
@@ -235,6 +268,12 @@ export const DroneSimView = () => {
     left: false,
     right: false,
   });
+  const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
+  const [cameraInsetWidth, setCameraInsetWidth] = useState(() => {
+    const raw = localStorage.getItem(CAMERA_INSET_STORAGE_KEY);
+    const parsed = raw !== null ? Number(raw) : INSET.width;
+    return Number.isFinite(parsed) ? Math.max(CAMERA_INSET_MIN_WIDTH, Math.round(parsed)) : INSET.width;
+  });
   const [mapSource, setMapSource] = useState<GroundSource>('satellite');
   const [mapZoomMin, setMapZoomMin] = useState(14);
   const [mapZoomMax, setMapZoomMax] = useState(18);
@@ -325,6 +364,8 @@ export const DroneSimView = () => {
     left: false,
     right: false,
   });
+  const cameraInsetWidthRef = useRef(cameraInsetWidth);
+  const cameraInsetResizeStateRef = useRef<{ startX: number; startY: number; startWidth: number } | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const animRef = useRef<number | null>(null);
@@ -692,6 +733,67 @@ export const DroneSimView = () => {
   };
 
   const activeCameraViewKeys = (Object.keys(cameraViews) as CameraViewKey[]).filter((key) => cameraViews[key]);
+  const activeCameraInsetLayout = getCameraInsetLayout(
+    viewportSize.width,
+    viewportSize.height,
+    activeCameraViewKeys.length,
+    cameraInsetWidth,
+  );
+
+  useEffect(() => {
+    cameraInsetWidthRef.current = cameraInsetWidth;
+    localStorage.setItem(CAMERA_INSET_STORAGE_KEY, String(cameraInsetWidth));
+  }, [cameraInsetWidth]);
+
+  useEffect(() => {
+    const streamRenderer = streamRendererRef.current;
+    if (!streamRenderer) return;
+    streamRenderer.setSize(cameraInsetWidth, Math.round(cameraInsetWidth / CAMERA_INSET_ASPECT_RATIO));
+  }, [cameraInsetWidth]);
+
+  const handleCameraInsetResizeMove = useCallback((event: PointerEvent) => {
+    const resizeState = cameraInsetResizeStateRef.current;
+    const viewport = viewportRef.current;
+    if (!resizeState || !viewport) return;
+
+    const activeCount = (Object.keys(cameraViewStateRef.current) as CameraViewKey[]).filter((key) => cameraViewStateRef.current[key]).length;
+    const maxWidth = getMaxCameraInsetWidth(viewport.clientWidth || 1, viewport.clientHeight || 1, activeCount);
+    const minWidth = Math.min(CAMERA_INSET_MIN_WIDTH, maxWidth);
+    const deltaX = event.clientX - resizeState.startX;
+    const deltaFromHeight = (event.clientY - resizeState.startY) * CAMERA_INSET_ASPECT_RATIO;
+    const dominantDelta = Math.abs(deltaX) >= Math.abs(deltaFromHeight) ? deltaX : deltaFromHeight;
+    const nextWidth = clampNumber(Math.round(resizeState.startWidth + dominantDelta), minWidth, maxWidth);
+    cameraInsetWidthRef.current = nextWidth;
+    setCameraInsetWidth(nextWidth);
+  }, []);
+
+  const stopCameraInsetResize = useCallback(() => {
+    cameraInsetResizeStateRef.current = null;
+    document.body.style.removeProperty('cursor');
+    document.body.style.removeProperty('user-select');
+    window.removeEventListener('pointermove', handleCameraInsetResizeMove);
+    window.removeEventListener('pointerup', stopCameraInsetResize);
+    window.removeEventListener('pointercancel', stopCameraInsetResize);
+  }, [handleCameraInsetResizeMove]);
+
+  const handleCameraInsetResizeStart = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    cameraInsetResizeStateRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: cameraInsetWidthRef.current,
+    };
+    document.body.style.cursor = 'nwse-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handleCameraInsetResizeMove);
+    window.addEventListener('pointerup', stopCameraInsetResize);
+    window.addEventListener('pointercancel', stopCameraInsetResize);
+  }, [handleCameraInsetResizeMove, stopCameraInsetResize]);
+
+  useEffect(() => () => stopCameraInsetResize(), [stopCameraInsetResize]);
 
   const handleManualInputModeChange = (mode: ManualInputMode) => {
     setManualInputMode(mode);
@@ -1255,6 +1357,7 @@ export const DroneSimView = () => {
 
     const width = viewport.clientWidth || 1;
     const height = viewport.clientHeight || 1;
+    setViewportSize({ width, height });
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 20000);
     camera.position.set(-50, 50, 50);
 
@@ -1264,7 +1367,7 @@ export const DroneSimView = () => {
     viewport.appendChild(renderer.domElement);
 
     const streamRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-    streamRenderer.setSize(INSET.width, INSET.height);
+    streamRenderer.setSize(cameraInsetWidthRef.current, Math.round(cameraInsetWidthRef.current / CAMERA_INSET_ASPECT_RATIO));
     streamRenderer.shadowMap.enabled = true;
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -1426,33 +1529,33 @@ export const DroneSimView = () => {
     scene.add(axisGroup);
     state.axisGroup = axisGroup;
 
-    const bottomCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    const bottomCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
     bottomCamera.position.set(0, -1.4, 0);
     bottomCamera.rotation.x = -Math.PI / 2;
     state.droneGroup.add(bottomCamera);
     const { helper: bottomFovHelper, update: updateBottomFovHelper } = createFrustumHelper(bottomCamera);
     scene.add(bottomFovHelper);
 
-    const bottomCleanCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    const bottomCleanCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
     bottomCleanCamera.position.copy(bottomCamera.position);
     bottomCleanCamera.rotation.copy(bottomCamera.rotation);
     state.droneGroup.add(bottomCleanCamera);
 
-    const frontCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    const frontCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
     frontCamera.position.set(0, 0.15, 0.7);
     applyDirectionalCameraTilt(frontCamera, Math.PI, frontCameraTiltDeg);
     state.droneGroup.add(frontCamera);
     const { helper: frontFovHelper, update: updateFrontFovHelper } = createFrustumHelper(frontCamera);
     scene.add(frontFovHelper);
 
-    const leftCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    const leftCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
     leftCamera.position.set(-0.7, 0.1, 0);
     applyDirectionalCameraTilt(leftCamera, Math.PI / 2, leftCameraTiltDeg);
     state.droneGroup.add(leftCamera);
     const { helper: leftFovHelper, update: updateLeftFovHelper } = createFrustumHelper(leftCamera);
     scene.add(leftFovHelper);
 
-    const rightCamera = new THREE.PerspectiveCamera(60, INSET.width / INSET.height, 0.1, 5000);
+    const rightCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
     rightCamera.position.set(0.7, 0.1, 0);
     applyDirectionalCameraTilt(rightCamera, -Math.PI / 2, rightCameraTiltDeg);
     state.droneGroup.add(rightCamera);
@@ -1778,10 +1881,12 @@ export const DroneSimView = () => {
       renderer.render(scene, camera);
 
       const activeViews = (Object.keys(cameraViewStateRef.current) as CameraViewKey[]).filter((key) => cameraViewStateRef.current[key]);
-      const columns = activeViews.length > 1 ? 2 : 1;
-      const rows = Math.ceil(activeViews.length / columns);
-      const insetWidth = Math.min(INSET.width, Math.floor((viewportWidth - INSET.margin * (columns + 1)) / columns));
-      const insetHeight = Math.min(INSET.height, Math.floor((viewportHeight - INSET.margin * (rows + 1)) / Math.max(1, rows)));
+      const { columns, rows, width: insetWidth, height: insetHeight } = getCameraInsetLayout(
+        viewportWidth,
+        viewportHeight,
+        activeViews.length,
+        cameraInsetWidthRef.current,
+      );
       activeViews.forEach((view, index) => {
         const cam = droneCameraRefs.current[view];
         if (!cam || insetWidth <= 0 || insetHeight <= 0) return;
@@ -1855,9 +1960,11 @@ export const DroneSimView = () => {
         if (frontFovHelper) frontFovHelper.visible = false;
         if (leftFovHelper) leftFovHelper.visible = false;
         if (rightFovHelper) rightFovHelper.visible = false;
-        cleanCamera.aspect = INSET.width / INSET.height;
+        const cleanStreamWidth = cameraInsetWidthRef.current;
+        const cleanStreamHeight = Math.max(1, Math.round(cleanStreamWidth / CAMERA_INSET_ASPECT_RATIO));
+        cleanCamera.aspect = CAMERA_INSET_ASPECT_RATIO;
         cleanCamera.updateProjectionMatrix();
-        streamRenderer.setViewport(0, 0, INSET.width, INSET.height);
+        streamRenderer.setViewport(0, 0, cleanStreamWidth, cleanStreamHeight);
         streamRenderer.setScissorTest(false);
         streamRenderer.render(scene, cleanCamera);
         if (bottomFovHelper) bottomFovHelper.visible = prevBottomFovVisible;
@@ -1895,6 +2002,7 @@ export const DroneSimView = () => {
     const handleResize = () => {
       const nextWidth = viewport.clientWidth || 1;
       const nextHeight = viewport.clientHeight || 1;
+      setViewportSize({ width: nextWidth, height: nextHeight });
       camera.aspect = nextWidth / nextHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(nextWidth, nextHeight);
@@ -2328,12 +2436,9 @@ export const DroneSimView = () => {
         </div>
 
         {activeCameraViewKeys.map((view, index) => {
-          const columns = activeCameraViewKeys.length > 1 ? 2 : 1;
-          const rows = Math.ceil(activeCameraViewKeys.length / columns);
+          const { columns, rows, width, height } = activeCameraInsetLayout;
           const col = index % columns;
           const row = Math.floor(index / columns);
-          const width = INSET.width;
-          const height = INSET.height;
           const right = INSET.margin + ((columns - col - 1) * (width + INSET.margin));
           const bottom = INSET.margin + ((rows - row - 1) * (height + INSET.margin));
 
@@ -2344,6 +2449,17 @@ export const DroneSimView = () => {
               style={{ width, height, right, bottom }}
             >
               <div className="drone-sim__camera-label">{CAMERA_VIEW_LABELS[view]}</div>
+              <button
+                type="button"
+                className="drone-sim__camera-resize-handle"
+                aria-label="Resize camera panels"
+                title="Drag to resize camera panels"
+                onPointerDown={handleCameraInsetResizeStart}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
             </div>
           );
         })}
