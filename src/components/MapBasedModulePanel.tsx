@@ -13,6 +13,7 @@ const API_BASE = import.meta.env.VITE_CHAOX_API_BASE || 'http://localhost:9000';
 const DEFAULT_WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 const DEFAULT_LIVE_FEED_URL = `${DEFAULT_WS_BASE}/camera`;
 const DEFAULT_TELEMETRY_URL = `${DEFAULT_WS_BASE}/ws/telemetry`;
+const DEFAULT_SIM_VEHICLE_ID = 'vehicle-1';
 
 const SectionLabel = ({ children }: { children: string }) => (
   <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">{children}</div>
@@ -291,6 +292,21 @@ export const MapBasedModulePanel = () => {
         initYaw = Number(data.compass ?? data.yaw ?? 0);
         if (![initLat, initLon, initYaw].every((value) => Number.isFinite(value))) {
           setMapMatchStatus('Telemetry missing valid lat/lon/yaw fields.');
+          return;
+        }
+      } else if (telemetryUrlSaved && (telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://'))) {
+        const res = await fetch(`${API_BASE}/telemetry/${DEFAULT_SIM_VEHICLE_ID}`);
+        if (!res.ok) {
+          setMapMatchStatus(`Telemetry snapshot failed (${res.status}).`);
+          return;
+        }
+        const data = await res.json();
+        initLat = Number(data.lat);
+        initLon = Number(data.lon);
+        initYaw = Number(data.compass ?? data.yaw ?? 0);
+        const hasPose = [initLat, initLon, initYaw].every((value) => Number.isFinite(value)) && !(initLat === 0 && initLon === 0);
+        if (!hasPose) {
+          setMapMatchStatus('Start the simulator flight first so telemetry can seed localization.');
           return;
         }
       } else if (lastInit) {

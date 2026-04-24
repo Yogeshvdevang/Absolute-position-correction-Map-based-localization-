@@ -44,11 +44,13 @@ import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Switch } from './ui/switch';
+import { subscribeSimCameraFrames } from '@/lib/simCameraBridge';
 
 const API_BASE = import.meta.env.VITE_CHAOX_API_BASE || 'http://localhost:9000';
 const DEFAULT_WS_BASE = import.meta.env.VITE_CHAOX_WS_BASE || 'ws://localhost:9000';
 const DEFAULT_LIVE_FEED_URL = `${DEFAULT_WS_BASE}/camera`;
 const DEFAULT_TELEMETRY_URL = `${DEFAULT_WS_BASE}/ws/telemetry`;
+const DEFAULT_SIM_VEHICLE_ID = 'vehicle-1';
 
 type VisualProbe = {
   valid?: boolean;
@@ -82,6 +84,33 @@ type ApcDebugArtifacts = {
   match_image_b64?: string | null;
 };
 
+type TelemetryState = {
+  vehicle_id: string;
+  lat: number;
+  lon: number;
+  alt: number;
+  roll: number | null;
+  pitch: number | null;
+  yaw: number | null;
+  groundspeed: number | null;
+  battery: number | null;
+  mode: string | null;
+  link_quality: number | null;
+  sampleTs: number;
+};
+
+type LocalizationSample = {
+  ts: number;
+  lat: number;
+  lon: number;
+  alt: number | null;
+  errorRadius: number | null;
+  confidence: number | null;
+  telemetryLat: number | null;
+  telemetryLon: number | null;
+  telemetryAlt: number | null;
+};
+
 type ImuSample = {
   t: string;
   gyro: number;
@@ -98,9 +127,13 @@ type ErrorSample = {
 type TrackSample = {
   x: number;
   coarse: number;
+  coarseEast: number;
   fused: number;
+  fusedEast: number;
   truth: number;
+  truthEast: number;
   scatter: number;
+  scatterEast: number;
 };
 
 const panelShell =
@@ -149,30 +182,157 @@ const formatNumber = (value: number | null | undefined, digits = 2) =>
 const toDataImageSrc = (imageB64: string | null | undefined) =>
   imageB64 ? `data:image/jpeg;base64,${imageB64}` : null;
 
-const buildImuSeries = () =>
-  Array.from({ length: 40 }, (_, index) => ({
-    t: `${index}`,
-    gyro: 1.8 + Math.sin(index / 4) * 0.35 + Math.cos(index / 7) * 0.15,
-    accel: -9 + Math.cos(index / 5) * 2.4 + Math.sin(index / 8) * 0.5,
-  }));
+const CAMERA_SUBSCRIBE_MESSAGE = '__subscribe__';
+const MAX_TELEMETRY_HISTORY = 40;
+const MAX_LOCALIZATION_HISTORY = 40;
+const MAX_TRACK_HISTORY = 28;
+const APC_STREAM_INTERVAL_MS = 250;
 
-const buildErrorSeries = () =>
-  Array.from({ length: 40 }, (_, index) => ({
-    t: `${index}`,
-    horizontal: 18 + Math.sin(index / 3) * 6 + (index % 13 === 0 ? 12 : 0),
-    vertical: 1.2 + Math.cos(index / 4) * 0.8,
-    mean: 24 + Math.sin(index / 5) * 4 + (index % 11 === 0 ? 8 : 0),
-  }));
+const toFiniteNumber = (value: unknown) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
 
-const buildTrackSeries = (offset = 0) =>
-  Array.from({ length: 28 }, (_, index) => {
-    const x = index;
-    const truth = 84 - index * 2.1;
-    const fused = truth + Math.sin((index + offset) / 5) * 1.8;
-    const coarse = truth + 2.8 + Math.cos((index + offset) / 4) * 2.4;
-    const scatter = truth + Math.sin((index + offset) / 2.6) * 9 + (index % 7 === 0 ? -7 : 0);
-    return { x, coarse, fused, truth, scatter };
+const normalizeAngleDelta = (value: number) => {
+  if (!Number.isFinite(value)) return 0;
+  let normalized = value;
+  while (normalized > 180) normalized -= 360;
+  while (normalized < -180) normalized += 360;
+  return normalized;
+};
+
+const earthOffsetMeters = (
+  lat: number,
+  lon: number,
+  referenceLat: number,
+  referenceLon: number
+) => {
+  const latScale = 111_320;
+  const lonScale = Math.cos((referenceLat * Math.PI) / 180) * 111_320;
+  return {
+    east: (lon - referenceLon) * lonScale,
+    north: (lat - referenceLat) * latScale,
+  };
+};
+
+const distanceMeters = (latA: number, lonA: number, latB: number, lonB: number) => {
+  const a = earthOffsetMeters(latA, lonA, latB, lonB);
+  return Math.hypot(a.east, a.north);
+};
+
+const buildImuSeries = (history: TelemetryState[]): ImuSample[] =>
+  history.map((sample, index) => {
+    const previous = history[Math.max(0, index - 1)] ?? sample;
+    const dt = Math.max(0.05, (sample.sampleTs - previous.sampleTs) / 1000 || 0.2);
+    const yawDelta = normalizeAngleDelta((sample.yaw ?? previous.yaw ?? 0) - (previous.yaw ?? sample.yaw ?? 0));
+    const rollDelta = (sample.roll ?? previous.roll ?? 0) - (previous.roll ?? sample.roll ?? 0);
+    const pitchDelta = (sample.pitch ?? previous.pitch ?? 0) - (previous.pitch ?? sample.pitch ?? 0);
+    const speed = sample.groundspeed ?? previous.groundspeed ?? 0;
+    const previousSpeed = previous.groundspeed ?? speed;
+    const verticalSpeed = (sample.alt - previous.alt) / dt;
+    return {
+      t: `${index + 1}`,
+      gyro: Math.hypot(yawDelta / dt, rollDelta / dt, pitchDelta / dt),
+      accel: (speed - previousSpeed) / dt + verticalSpeed * 0.35,
+    };
   });
+
+const buildErrorSeries = (history: LocalizationSample[]): ErrorSample[] =>
+  history.map((sample, index) => {
+    const horizontal =
+      sample.telemetryLat !== null && sample.telemetryLon !== null
+        ? distanceMeters(sample.lat, sample.lon, sample.telemetryLat, sample.telemetryLon)
+        : sample.errorRadius ?? 0;
+    const vertical =
+      sample.alt !== null && sample.telemetryAlt !== null
+        ? Math.abs(sample.alt - sample.telemetryAlt)
+        : 0;
+    return {
+      t: `${index + 1}`,
+      horizontal,
+      vertical,
+      mean: sample.errorRadius ?? horizontal,
+    };
+  });
+
+const buildTrackSeries = (
+  telemetryHistory: TelemetryState[],
+  localizationHistory: LocalizationSample[]
+): TrackSample[] => {
+  const samples = telemetryHistory.slice(-MAX_TRACK_HISTORY);
+  if (!samples.length) {
+    return Array.from({ length: 8 }, (_, index) => ({
+      x: index,
+      coarse: 0,
+      coarseEast: 0,
+      fused: 0,
+      fusedEast: 0,
+      truth: 0,
+      truthEast: 0,
+      scatter: 0,
+      scatterEast: 0,
+    }));
+  }
+
+  const origin = samples[0];
+  let localizationCursor = 0;
+
+  return samples.map((sample, index) => {
+    while (
+      localizationCursor + 1 < localizationHistory.length &&
+      localizationHistory[localizationCursor + 1].ts <= sample.sampleTs
+    ) {
+      localizationCursor += 1;
+    }
+
+    const telemetryOffset = earthOffsetMeters(sample.lat, sample.lon, origin.lat, origin.lon);
+    const localization = localizationHistory[localizationCursor] ?? null;
+    const localizationOffset =
+      localization && localization.ts <= sample.sampleTs
+        ? earthOffsetMeters(localization.lat, localization.lon, origin.lat, origin.lon)
+        : telemetryOffset;
+    const truth = telemetryOffset.north;
+    const fused = localizationOffset.north;
+    const truthEast = telemetryOffset.east;
+    const fusedEast = localizationOffset.east;
+
+    return {
+      x: index,
+      coarse: (truth + fused) * 0.5,
+      coarseEast: (truthEast + fusedEast) * 0.5,
+      fused,
+      fusedEast,
+      truth,
+      truthEast,
+      scatter: telemetryOffset.east,
+      scatterEast: telemetryOffset.east,
+    };
+  });
+};
+
+const normalizeTelemetrySample = (payload: any): TelemetryState | null => {
+  const lat = toFiniteNumber(payload?.lat);
+  const lon = toFiniteNumber(payload?.lon);
+  const alt = toFiniteNumber(payload?.alt);
+  if (lat === null || lon === null || alt === null) {
+    return null;
+  }
+
+  return {
+    vehicle_id: String(payload?.vehicle_id || DEFAULT_SIM_VEHICLE_ID),
+    lat,
+    lon,
+    alt,
+    roll: toFiniteNumber(payload?.roll),
+    pitch: toFiniteNumber(payload?.pitch),
+    yaw: toFiniteNumber(payload?.yaw ?? payload?.compass),
+    groundspeed: toFiniteNumber(payload?.groundspeed),
+    battery: toFiniteNumber(payload?.battery),
+    mode: typeof payload?.mode === 'string' ? payload.mode : null,
+    link_quality: toFiniteNumber(payload?.link_quality),
+    sampleTs: Date.now(),
+  };
+};
 
 const feedTexture = (variant: 1 | 2 | 3 | 4) => {
   const palettes = {
@@ -410,18 +570,30 @@ const useApcGroundMap = ({
   return state;
 };
 
-const projectTrackPoint = (x: number, value: number, yBias = 0): ScenePoint => {
-  const centeredX = (x - 13.5) * 1.55;
-  const depth = (value - 52) * 0.44;
-  const elevation = -3 + (value - 48) * 0.05 + yBias;
-  return [centeredX, elevation, depth];
-};
+const buildMapTrackPoint = (
+  eastMeters: number,
+  northMeters: number,
+  scale: number,
+  elevation = -3.28
+): ScenePoint => [eastMeters * scale, elevation, -northMeters * scale];
 
-const buildTrackPath = (series: TrackSample[], key: keyof Pick<TrackSample, 'coarse' | 'truth' | 'fused'>, yBias = 0) =>
-  series.map((sample) => projectTrackPoint(sample.x, sample[key], yBias));
+const buildTrackPath = (
+  series: TrackSample[],
+  northKey: keyof Pick<TrackSample, 'coarse' | 'truth' | 'fused'>,
+  eastKey: keyof Pick<TrackSample, 'coarseEast' | 'truthEast' | 'fusedEast'>,
+  scale: number,
+  elevation = -3.28
+) => series.map((sample) => buildMapTrackPoint(sample[eastKey], sample[northKey], scale, elevation));
 
-const buildScatterCloud = (series: TrackSample[]) =>
-  series.map((sample) => projectTrackPoint(sample.x, sample.scatter, 0.65 + Math.sin(sample.x / 3) * 0.35));
+const buildScatterCloud = (series: TrackSample[], scale: number) =>
+  series.map((sample) =>
+    buildMapTrackPoint(
+      sample.scatterEast,
+      sample.truth,
+      scale,
+      -2.75 + Math.sin(sample.x / 3) * 0.18
+    )
+  );
 
 const ApcDroneMarker = ({
   position,
@@ -472,36 +644,64 @@ const ApcTrajectoryScene = ({
   groundTexture: THREE.Texture | null;
   groundPlaneSize: number;
 }) => {
-  const coarsePath = useMemo(() => buildTrackPath(trackSeries, 'coarse', 0.1), [trackSeries]);
-  const truthPath = useMemo(() => buildTrackPath(trackSeries, 'truth', -0.05), [trackSeries]);
-  const fusedPath = useMemo(() => buildTrackPath(trackSeries, 'fused', 0.25), [trackSeries]);
-  const scatterCloud = useMemo(() => buildScatterCloud(trackSeries), [trackSeries]);
-  const dronePoint = fusedPath[fusedPath.length - 1] ?? [0, -2.2, 0];
+  const maxHorizontalRange = useMemo(() => {
+    const extents = trackSeries.flatMap((sample) => [
+      Math.abs(sample.truth),
+      Math.abs(sample.truthEast),
+      Math.abs(sample.fused),
+      Math.abs(sample.fusedEast),
+      Math.abs(sample.coarse),
+      Math.abs(sample.coarseEast),
+    ]);
+    return Math.max(24, ...extents);
+  }, [trackSeries]);
+  const planeSpan = Math.max(groundPlaneSize * 0.42, 140);
+  const mapScale = planeSpan / (maxHorizontalRange * 2);
+  const coarsePath = useMemo(
+    () => buildTrackPath(trackSeries, 'coarse', 'coarseEast', mapScale, -3.12),
+    [mapScale, trackSeries]
+  );
+  const truthPath = useMemo(
+    () => buildTrackPath(trackSeries, 'truth', 'truthEast', mapScale, -3.18),
+    [mapScale, trackSeries]
+  );
+  const fusedPath = useMemo(
+    () => buildTrackPath(trackSeries, 'fused', 'fusedEast', mapScale, -3.02),
+    [mapScale, trackSeries]
+  );
+  const scatterCloud = useMemo(() => buildScatterCloud(trackSeries, mapScale), [mapScale, trackSeries]);
+  const dronePoint = fusedPath[fusedPath.length - 1] ?? [0, -3.02, 0];
   const previousDronePoint = fusedPath[fusedPath.length - 2] ?? dronePoint;
   const heading = Math.atan2(dronePoint[2] - previousDronePoint[2], dronePoint[0] - previousDronePoint[0]);
+  const cameraHeight = Math.max(groundPlaneSize * 0.38, 190);
+  const groundTextureKey = groundTexture?.uuid ?? 'ground-empty';
 
   return (
-    <Canvas className="h-full w-full" dpr={[1, 2]} gl={{ antialias: true }}>
+    <Canvas
+      className="h-full w-full"
+      dpr={[1, 2]}
+      gl={{ antialias: true }}
+      camera={{ position: [0, cameraHeight, groundPlaneSize * 0.16], fov: 34, near: 1, far: 12000 }}
+    >
       <color attach="background" args={['#07101c']} />
-      <fog attach="fog" args={['#07101c', 20, 68]} />
       <ambientLight intensity={1.05} />
-      <directionalLight position={[18, 18, 6]} intensity={1.4} color="#dbeafe" />
-      <directionalLight position={[-12, 9, -16]} intensity={0.8} color="#67e8f9" />
 
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -3.7, 0]} receiveShadow>
-        <planeGeometry args={[groundPlaneSize, groundPlaneSize, 1, 1]} />
-        <meshStandardMaterial
-          color="#081423"
-          roughness={0.96}
-          metalness={0.05}
-          map={groundTexture}
-        />
-      </mesh>
+      {groundTexture ? (
+        <mesh key={groundTextureKey} rotation={[-Math.PI / 2, 0, 0]} position={[0, -3.35, 0]}>
+          <planeGeometry args={[groundPlaneSize, groundPlaneSize, 1, 1]} />
+          <meshBasicMaterial map={groundTexture} toneMapped={false} side={THREE.DoubleSide} />
+        </mesh>
+      ) : (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -3.35, 0]}>
+          <planeGeometry args={[groundPlaneSize, groundPlaneSize, 1, 1]} />
+          <meshBasicMaterial color="#081423" toneMapped={false} />
+        </mesh>
+      )}
 
-      <gridHelper args={[groundPlaneSize, 42, '#173b73', '#10243f']} position={[0, -3.68, 0]} />
+      <gridHelper args={[groundPlaneSize, 16, '#173b73', '#10243f']} position={[0, -3.3, 0]} />
 
-      <DreiLine points={[[-22, -3.66, 0], [22, -3.66, 0]]} color="#143454" lineWidth={0.8} />
-      <DreiLine points={[[0, -3.66, -18], [0, -3.66, 18]]} color="#143454" lineWidth={0.8} />
+      <DreiLine points={[[-planeSpan, -3.27, 0], [planeSpan, -3.27, 0]]} color="#143454" lineWidth={0.8} />
+      <DreiLine points={[[0, -3.27, -planeSpan], [0, -3.27, planeSpan]]} color="#143454" lineWidth={0.8} />
       <DreiLine points={coarsePath} color="#ef4444" lineWidth={2.2} />
       <DreiLine points={truthPath} color="#f59e0b" lineWidth={1.8} />
       <DreiLine points={fusedPath} color="#4ade80" lineWidth={2.8} />
@@ -531,10 +731,10 @@ const ApcTrajectoryScene = ({
         enablePan
         enableZoom
         enableRotate
-        target={[0, -2.6, 0]}
-        minDistance={12}
-        maxDistance={44}
-        maxPolarAngle={Math.PI / 2.1}
+        target={[0, -3.1, 0]}
+        minDistance={40}
+        maxDistance={Math.max(groundPlaneSize * 0.75, 420)}
+        maxPolarAngle={Math.PI / 2.5}
       />
     </Canvas>
   );
@@ -880,10 +1080,15 @@ const StatStrip = ({
 export const ApcDashboardPanel = () => {
   const sourceFeedSocketRef = useRef<WebSocket | null>(null);
   const backendFeedSocketRef = useRef<WebSocket | null>(null);
+  const liveCameraSocketRef = useRef<WebSocket | null>(null);
+  const telemetrySocketRef = useRef<WebSocket | null>(null);
   const apcSocketRef = useRef<WebSocket | null>(null);
   const apcLoopRef = useRef<number | null>(null);
   const apcSendBusyRef = useRef(false);
   const apcManualStopRef = useRef(false);
+  const liveTelemetryRef = useRef<TelemetryState | null>(null);
+  const apcResultRef = useRef<ApcResult | null>(null);
+  const liveCameraLastFrameAtRef = useRef(0);
   const [tileMatcherBackend, setTileMatcherBackend] = useState('native');
   const [visualMapDbPath, setVisualMapDbPath] = useState('');
   const [visualProbe, setVisualProbe] = useState<VisualProbe | null>(null);
@@ -905,10 +1110,18 @@ export const ApcDashboardPanel = () => {
   const [apcResult, setApcResult] = useState<ApcResult | null>(null);
   const [mapMatchBusy, setMapMatchBusy] = useState(false);
   const [liveLocalizationActive, setLiveLocalizationActive] = useState(false);
-  const [cameraFrameTick, setCameraFrameTick] = useState(0);
-  const [imuSeries, setImuSeries] = useState<ImuSample[]>(() => buildImuSeries());
-  const [errorSeries, setErrorSeries] = useState<ErrorSample[]>(() => buildErrorSeries());
-  const [tick, setTick] = useState(0);
+  const [liveCameraFrameUrl, setLiveCameraFrameUrl] = useState<string | null>(null);
+  const [liveTelemetry, setLiveTelemetry] = useState<TelemetryState | null>(null);
+  const [telemetryHistory, setTelemetryHistory] = useState<TelemetryState[]>([]);
+  const [localizationHistory, setLocalizationHistory] = useState<LocalizationSample[]>([]);
+
+  useEffect(() => {
+    liveTelemetryRef.current = liveTelemetry;
+  }, [liveTelemetry]);
+
+  useEffect(() => {
+    apcResultRef.current = apcResult;
+  }, [apcResult]);
 
   useEffect(() => {
     const savedFeed = localStorage.getItem('chaox.liveFeedUrl');
@@ -927,6 +1140,8 @@ export const ApcDashboardPanel = () => {
     return () => {
       sourceFeedSocketRef.current?.close();
       backendFeedSocketRef.current?.close();
+      liveCameraSocketRef.current?.close();
+      telemetrySocketRef.current?.close();
       apcManualStopRef.current = true;
       apcSocketRef.current?.close();
       if (apcLoopRef.current !== null) {
@@ -935,6 +1150,127 @@ export const ApcDashboardPanel = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const backendCameraWs = `${DEFAULT_WS_BASE}/camera`;
+    const socket = new WebSocket(backendCameraWs);
+    liveCameraSocketRef.current = socket;
+
+    socket.onopen = () => {
+      socket.send(CAMERA_SUBSCRIBE_MESSAGE);
+      setLiveFeedStatus(`Streaming live simulator frames from ${backendCameraWs}`);
+    };
+
+    socket.onmessage = (event) => {
+      if (typeof event.data === 'string' && event.data.trim()) {
+        liveCameraLastFrameAtRef.current = Date.now();
+        setLiveCameraFrameUrl(`data:image/jpeg;base64,${event.data}`);
+      }
+    };
+
+    socket.onerror = () => {
+      setLiveFeedStatus('Live camera stream connection failed.');
+    };
+
+    socket.onclose = () => {
+      if (liveCameraSocketRef.current === socket) {
+        liveCameraSocketRef.current = null;
+      }
+      setLiveFeedStatus('Live camera stream disconnected.');
+    };
+
+    return () => {
+      if (liveCameraSocketRef.current === socket) {
+        liveCameraSocketRef.current = null;
+      }
+      socket.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeSimCameraFrames((payload) => {
+      liveCameraLastFrameAtRef.current = Date.now();
+      setLiveCameraFrameUrl(`data:image/jpeg;base64,${payload.imageB64}`);
+      setLiveFeedStatus('Streaming simulator bottom camera via direct bridge.');
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const idleMs = Date.now() - liveCameraLastFrameAtRef.current;
+      if (idleMs < 1200) return;
+      setLiveCameraFrameUrl(`${API_BASE}/camera/latest.jpg?ts=${Date.now()}`);
+    }, 800);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!telemetryUrlSaved || useManualInit) {
+      telemetrySocketRef.current?.close();
+      telemetrySocketRef.current = null;
+      return;
+    }
+
+    if (!(telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://'))) {
+      return;
+    }
+
+    const socket = new WebSocket(telemetryUrlSaved);
+    telemetrySocketRef.current = socket;
+
+    socket.onopen = () => {
+      setMapMatchStatus((current) => current ?? 'Telemetry stream connected.');
+    };
+
+    socket.onmessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      try {
+        const payload = JSON.parse(event.data);
+        if (!Array.isArray(payload)) return;
+        const selected = payload.find((item) => item?.vehicle_id === DEFAULT_SIM_VEHICLE_ID) ?? payload[0];
+        const sample = normalizeTelemetrySample(selected);
+        if (!sample) return;
+        setLiveTelemetry(sample);
+        setLastInit({
+          lat: sample.lat,
+          lon: sample.lon,
+          compass: sample.yaw ?? 0,
+        });
+        setTelemetryHistory((current) => [...current.slice(-(MAX_TELEMETRY_HISTORY - 1)), sample]);
+      } catch {
+        // Ignore non-telemetry control frames on this socket.
+      }
+    };
+
+    socket.onerror = () => {
+      setMapMatchStatus((current) => current ?? 'Telemetry stream connection failed.');
+    };
+
+    socket.onclose = () => {
+      if (telemetrySocketRef.current === socket) {
+        telemetrySocketRef.current = null;
+      }
+      setMapMatchStatus((current) =>
+        current && current.toLowerCase().includes('tracking')
+          ? 'Telemetry stream disconnected during localization.'
+          : current
+      );
+    };
+
+    return () => {
+      if (telemetrySocketRef.current === socket) {
+        telemetrySocketRef.current = null;
+      }
+      socket.close();
+    };
+  }, [telemetryUrlSaved, useManualInit]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1018,7 +1354,7 @@ export const ApcDashboardPanel = () => {
     const backendCameraWs = `${DEFAULT_WS_BASE}/camera`;
 
     if (liveFeedUrlSaved === backendCameraWs) {
-      setLiveFeedStatus(`Backend camera ingest is configured at ${backendCameraWs}. Waiting for a producer to push frames.`);
+      setLiveFeedStatus(`Subscribed to ${backendCameraWs}. Waiting for simulator frames.`);
       return;
     }
 
@@ -1156,6 +1492,27 @@ export const ApcDashboardPanel = () => {
       if (![initLat, initLon, initYaw].every((value) => Number.isFinite(value))) {
         throw new Error('Telemetry missing valid lat/lon/yaw fields.');
       }
+    } else if (liveTelemetry) {
+      initLat = liveTelemetry.lat;
+      initLon = liveTelemetry.lon;
+      initYaw = liveTelemetry.yaw ?? 0;
+      const hasPose = !(initLat === 0 && initLon === 0);
+      if (!hasPose) {
+        throw new Error('Start the simulator flight first so telemetry can seed localization.');
+      }
+    } else if (telemetryUrlSaved && (telemetryUrlSaved.startsWith('ws://') || telemetryUrlSaved.startsWith('wss://'))) {
+      const res = await fetch(`${API_BASE}/telemetry/${DEFAULT_SIM_VEHICLE_ID}`);
+      if (!res.ok) {
+        throw new Error(`Telemetry snapshot failed (${res.status}).`);
+      }
+      const data = await res.json();
+      initLat = Number(data.lat);
+      initLon = Number(data.lon);
+      initYaw = Number(data.compass ?? data.yaw ?? 0);
+      const hasPose = [initLat, initLon, initYaw].every((value) => Number.isFinite(value)) && !(initLat === 0 && initLon === 0);
+      if (!hasPose) {
+        throw new Error('Start the simulator flight first so telemetry can seed localization.');
+      }
     } else if (lastInit) {
       initLat = lastInit.lat;
       initLon = lastInit.lon;
@@ -1193,25 +1550,24 @@ export const ApcDashboardPanel = () => {
     apcSendBusyRef.current = true;
     try {
       const seed = await resolveInitialPose();
-      const latSeed =
-        typeof apcResult?.lat === 'number' && Number.isFinite(apcResult.lat)
-          ? apcResult.lat
-          : seed.lat;
-      const lonSeed =
-        typeof apcResult?.lon === 'number' && Number.isFinite(apcResult.lon)
-          ? apcResult.lon
-          : seed.lon;
+      const livePose = liveTelemetryRef.current;
+      const currentResult = apcResultRef.current;
 
       socket.send(JSON.stringify({
         frame_id: `ui-live-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        lat: latSeed,
-        lon: lonSeed,
-        yaw: seed.compass,
+        lat: livePose?.lat ?? seed.lat,
+        lon: livePose?.lon ?? seed.lon,
+        alt: livePose?.alt ?? currentResult?.alt ?? null,
+        yaw: livePose?.yaw ?? seed.compass,
+        pitch: livePose?.pitch ?? null,
+        roll: livePose?.roll ?? null,
         meta: {
           requested_from: 'apc_dashboard_panel',
           backend: tileMatcherBackend,
           stream_mode: 'live',
+          groundspeed: livePose?.groundspeed ?? null,
+          mode: livePose?.mode ?? null,
         },
       }));
     } catch (error) {
@@ -1257,16 +1613,38 @@ export const ApcDashboardPanel = () => {
 
       socket.onopen = () => {
         setLiveLocalizationActive(true);
-        setMapMatchStatus('Live localization connected. Tracking latest buffered frames...');
+        setMapMatchStatus('Live localization connected. Streaming telemetry-seeded frames...');
         void pushApcFrame(socket);
         apcLoopRef.current = window.setInterval(() => {
           void pushApcFrame(socket);
-        }, 1400);
+        }, APC_STREAM_INTERVAL_MS);
       };
 
       socket.onmessage = (event) => {
         const payload = JSON.parse(event.data) as ApcResult;
         setApcResult(payload);
+        if (payload.lat !== null && payload.lon !== null) {
+          setLocalizationHistory((current) => [
+            ...current.slice(-(MAX_LOCALIZATION_HISTORY - 1)),
+            {
+              ts: Date.now(),
+              lat: Number(payload.lat),
+              lon: Number(payload.lon),
+              alt: typeof payload.alt === 'number' && Number.isFinite(payload.alt) ? payload.alt : null,
+              errorRadius:
+                typeof payload.error_radius_m === 'number' && Number.isFinite(payload.error_radius_m)
+                  ? payload.error_radius_m
+                  : null,
+              confidence:
+                typeof payload.confidence === 'number' && Number.isFinite(payload.confidence)
+                  ? payload.confidence
+                  : null,
+              telemetryLat: liveTelemetryRef.current?.lat ?? null,
+              telemetryLon: liveTelemetryRef.current?.lon ?? null,
+              telemetryAlt: liveTelemetryRef.current?.alt ?? null,
+            },
+          ]);
+        }
 
         if (payload.source === 'apc-dev') {
           setMapMatchStatus('No live camera frame is buffered yet. APC is using fallback dev output.');
@@ -1313,17 +1691,20 @@ export const ApcDashboardPanel = () => {
         ? 'ORB + RANSAC'
         : 'Native APC';
   const trackingState = liveLocalizationActive ? 'Tracking' : mapMatchBusy ? 'Locating' : apcResult ? 'Standby' : 'Standby';
-  const fusionState = useManualInit ? 'Ignoring' : lastInit ? 'Fusing GPS' : 'Awaiting Init';
-  const liveCameraFrameUrl = `${API_BASE}/camera/latest.jpg?ts=${cameraFrameTick}`;
+  const fusionState = useManualInit ? 'Ignoring' : liveTelemetry ? 'Fusing Telemetry' : lastInit ? 'Telemetry Locked' : 'Awaiting Init';
   const debugArtifacts = apcResult?.meta?.debug || null;
   const latestLatitude =
     typeof apcResult?.lat === 'number' && Number.isFinite(apcResult.lat)
       ? apcResult.lat
-      : lastInit?.lat ?? null;
+      : liveTelemetry?.lat ?? lastInit?.lat ?? null;
   const latestLongitude =
     typeof apcResult?.lon === 'number' && Number.isFinite(apcResult.lon)
       ? apcResult.lon
-      : lastInit?.lon ?? null;
+      : liveTelemetry?.lon ?? lastInit?.lon ?? null;
+  const latestAltitude =
+    typeof apcResult?.alt === 'number' && Number.isFinite(apcResult.alt)
+      ? apcResult.alt
+      : liveTelemetry?.alt ?? null;
   const latestConfidence =
     typeof apcResult?.confidence === 'number' && Number.isFinite(apcResult.confidence)
       ? apcResult.confidence
@@ -1336,7 +1717,12 @@ export const ApcDashboardPanel = () => {
   const liveTone = classifyStatus(liveFeedStatus);
   const matchTone = classifyStatus(mapMatchStatus);
   const visualTone = visualProbe?.valid ? 'ready' : classifyStatus(visualStatus);
-  const trackSeries = useMemo(() => buildTrackSeries(tick), [tick]);
+  const trackSeries = useMemo(
+    () => buildTrackSeries(telemetryHistory, localizationHistory),
+    [localizationHistory, telemetryHistory]
+  );
+  const imuSeries = useMemo(() => buildImuSeries(telemetryHistory), [telemetryHistory]);
+  const errorSeries = useMemo(() => buildErrorSeries(localizationHistory), [localizationHistory]);
   const highlightedTrackPoint = trackSeries[Math.min(19, trackSeries.length - 1)];
   const groundMapLatitude = latestLatitude ?? lastInit?.lat ?? APC_DEFAULT_COORDS.lat;
   const groundMapLongitude = latestLongitude ?? lastInit?.lon ?? APC_DEFAULT_COORDS.lon;
@@ -1387,10 +1773,10 @@ export const ApcDashboardPanel = () => {
             />
             <FeedPane
               title="/camera/boson1/image_raw/compressed/throttled"
-              subtitle="match"
+              subtitle="live"
               variant={2}
-              imageSrc={toDataImageSrc(debugArtifacts?.match_image_b64) ?? liveCameraFrameUrl}
-              footerLabels={['cam', 'match', 'viz']}
+              imageSrc={liveCameraFrameUrl}
+              footerLabels={['cam', 'live', 'viz']}
             />
           </div>
 
@@ -1618,7 +2004,7 @@ export const ApcDashboardPanel = () => {
             <StatStrip label="Fusion GPS" value={fusionState} tone={fusionState === 'Ignoring' ? 'warn' : 'ready'} />
             <StatStrip label="Estimator Tracking" value={trackingState} tone={matchTone} />
             <StatStrip label="Longitude" value={latestLongitude !== null ? formatNumber(latestLongitude, 5) : '--'} tone="idle" />
-            <StatStrip label="Altitude" value={`${latestErrorRadius !== null ? Math.max(18, latestErrorRadius * 3).toFixed(1) : '--'} m`} tone="idle" />
+            <StatStrip label="Altitude" value={latestAltitude !== null ? `${formatNumber(latestAltitude, 1)} m` : '--'} tone="idle" />
             <StatStrip label="Feed" value={liveFeedStatus ? 'Linked' : 'Offline'} tone={liveTone} />
             <StatStrip label="Vendor" value={visualProbe?.valid ? 'Ready' : 'Pending'} tone={visualTone} />
           </div>

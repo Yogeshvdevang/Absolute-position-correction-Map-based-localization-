@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from .execution_policy import select_profile
 from .compute import init_router
 from .ws_camera import camera_receiver
 from .ws_camera import frame_buffer
+from .ws_camera import push_camera_frame
 from .maps.raster_manager import RasterManager
 from .ai_engine.coarse_match import coarse_match
 from .ai_engine.ekf import EKF
@@ -84,6 +86,13 @@ class APCFrame(BaseModel):
   pitch: Optional[float] = None
   roll: Optional[float] = None
   image_b64: Optional[str] = None
+  meta: Optional[Dict[str, Any]] = None
+
+
+class CameraFrameUpload(BaseModel):
+  image_b64: str
+  timestamp: Optional[str] = None
+  source: Optional[str] = None
   meta: Optional[Dict[str, Any]] = None
 
 
@@ -312,6 +321,11 @@ class VisualLocalizationTileDbRequest(BaseModel):
   activate_for_visual_localization: bool = Field(True, description="Whether to set this DB as the active VL DB")
 
 
+class TileClearRequest(BaseModel):
+  map_types: Optional[List[str]] = Field(default=None, description="Map types to clear. Defaults to all cached map types.")
+  clear_visual_dbs: bool = Field(False, description="Whether to also remove exported visual localization DB folders.")
+
+
 def _lonlat_to_tile(lon: float, lat: float, z: int) -> Tuple[int, int]:
   import math
   lat = max(min(lat, 85.05112878), -85.05112878)
@@ -350,6 +364,65 @@ def _list_cached_zoom_levels(map_type: str) -> List[int]:
     if child.is_dir() and child.name.isdigit():
       zoom_levels.append(int(child.name))
   return sorted(zoom_levels)
+
+
+def _summarize_cache_dir(root: Path) -> Dict[str, Any]:
+  tile_count = 0
+  total_bytes = 0
+  zoom_levels: set[int] = set()
+  if not root.exists():
+    return {
+      "exists": False,
+      "tile_count": 0,
+      "size_bytes": 0,
+      "zoom_levels": [],
+    }
+  for tile_file in root.rglob("*.png"):
+    tile_count += 1
+    try:
+      total_bytes += tile_file.stat().st_size
+    except OSError:
+      pass
+    try:
+      zoom_value = int(tile_file.parts[-3])
+      zoom_levels.add(zoom_value)
+    except (ValueError, IndexError):
+      continue
+  return {
+    "exists": True,
+    "tile_count": tile_count,
+    "size_bytes": total_bytes,
+    "zoom_levels": sorted(zoom_levels),
+  }
+
+
+def _tile_cache_inventory() -> Dict[str, Any]:
+  map_types: Dict[str, Any] = {}
+  total_tiles = 0
+  total_bytes = 0
+  for map_type in TILE_TEMPLATES.keys():
+    summary = _summarize_cache_dir(TILE_CACHE_DIR / map_type)
+    map_types[map_type] = summary
+    total_tiles += int(summary["tile_count"])
+    total_bytes += int(summary["size_bytes"])
+  visual_dbs = []
+  if VISUAL_TILE_DB_DIR.exists():
+    for db_dir in sorted((path for path in VISUAL_TILE_DB_DIR.iterdir() if path.is_dir()), key=lambda path: path.name):
+      summary = _summarize_cache_dir(db_dir)
+      visual_dbs.append({
+        "name": db_dir.name,
+        "path": str(db_dir),
+        **summary,
+      })
+  return {
+    "cache_root": str(TILE_CACHE_DIR),
+    "visual_db_root": str(VISUAL_TILE_DB_DIR),
+    "map_types": map_types,
+    "total_tiles": total_tiles,
+    "total_size_bytes": total_bytes,
+    "visual_dbs": visual_dbs,
+    "active_visual_db_path": visual_localization.config.map_db_path,
+  }
 
 
 def _resolve_visual_localization_bootstrap() -> Tuple[Optional[Path], Optional[int]]:
@@ -663,6 +736,8 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
   apc_ekf.predict(dt)
 
   img = _decode_frame(frame.image_b64)
+  if img is not None:
+    frame_buffer.update(img)
   if img is None:
     img = frame_buffer.get()
   external_debug: Optional[Dict[str, Any]] = None
@@ -1108,6 +1183,11 @@ async def apc_set_config(cfg: APCConfig):
 @app.post("/apc/frame")
 async def apc_frame(frame: APCFrame):
   global apc_last_frame, apc_last_result
+  if frame.image_b64:
+    try:
+      await push_camera_frame(frame.image_b64)
+    except Exception:
+      pass
   apc_last_frame = frame
   apc_last_result = _run_apc_pipeline(frame)
   return apc_last_result
@@ -1143,6 +1223,16 @@ async def ws_apc(ws: WebSocket):
 @app.websocket("/camera")
 async def camera_ws(websocket: WebSocket):
   await camera_receiver(websocket)
+
+
+@app.post("/camera/frame")
+async def camera_frame_upload(payload: CameraFrameUpload):
+  await push_camera_frame(payload.image_b64)
+  return {
+    "status": "ok",
+    "timestamp": payload.timestamp,
+    "source": payload.source or "unknown",
+  }
 
 
 @app.get("/camera/latest.jpg")
@@ -1224,6 +1314,11 @@ async def tiles_status():
   return tiles_job
 
 
+@app.get("/tiles/cache")
+async def tiles_cache_inventory():
+  return _tile_cache_inventory()
+
+
 @app.post("/tiles/estimate")
 async def tiles_estimate(req: TileDownloadRequest):
   bbox = req.bbox or {"west": 25.0, "south": -10.0, "east": 180.0, "north": 82.0}
@@ -1243,6 +1338,51 @@ async def tiles_download(req: TileDownloadRequest):
 async def tiles_cancel():
   tiles_job["stopped"] = True
   return {"status": "stopping"}
+
+
+@app.post("/tiles/clear")
+async def tiles_clear(req: TileClearRequest):
+  if tiles_job.get("state") == "running" and not tiles_job.get("stopped"):
+    return JSONResponse(status_code=409, content={"status": "error", "reason": "Stop the current download before clearing cache."})
+
+  map_types = req.map_types or list(TILE_TEMPLATES.keys())
+  cleared_map_types: List[str] = []
+  for map_type in map_types:
+    target_dir = TILE_CACHE_DIR / map_type
+    if target_dir.exists():
+      shutil.rmtree(target_dir, ignore_errors=True)
+      cleared_map_types.append(map_type)
+
+  cleared_visual_dbs: List[str] = []
+  if req.clear_visual_dbs and VISUAL_TILE_DB_DIR.exists():
+    for db_dir in VISUAL_TILE_DB_DIR.iterdir():
+      if db_dir.is_dir():
+        shutil.rmtree(db_dir, ignore_errors=True)
+        cleared_visual_dbs.append(db_dir.name)
+    updated_config = visual_localization.config.model_copy(update={
+      "map_db_path": None,
+      "tile_zoom_level": None,
+      "enabled": False,
+    })
+    visual_localization.update(updated_config)
+
+  tiles_job.update({
+    "state": "idle",
+    "progress": 0,
+    "downloaded": 0,
+    "total": 0,
+    "current": None,
+    "started_at": None,
+    "stopped": False,
+    "error": None,
+  })
+
+  return {
+    "status": "cleared",
+    "cleared_map_types": cleared_map_types,
+    "cleared_visual_dbs": cleared_visual_dbs,
+    "inventory": _tile_cache_inventory(),
+  }
 
 
 @app.get("/tiles/visual-localization-db")

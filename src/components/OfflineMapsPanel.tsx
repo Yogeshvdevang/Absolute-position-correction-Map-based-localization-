@@ -46,6 +46,17 @@ const DEFAULT_ASIA_BBOX = {
 };
 
 const formatCoord = (value: number) => value.toFixed(6);
+const formatBytes = (bytes: number | null | undefined) => {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+};
 
 const buildBBoxFromCenterAndRadius = (lon: number, lat: number, radiusKm: number): BBox => {
   const boundedLat = Math.max(-85, Math.min(85, lat));
@@ -98,7 +109,10 @@ export const OfflineMapsPanel = ({
   const [budgetEstimate, setBudgetEstimate] = useState<number | null>(null);
   const [budgetBBoxLocal, setBudgetBBoxLocal] = useState<BBox | null>(null);
   const [status, setStatus] = useState<any>(null);
+  const [cacheInventory, setCacheInventory] = useState<any>(null);
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
+  const [clearMessage, setClearMessage] = useState<string | null>(null);
+  const [isClearingCache, setIsClearingCache] = useState(false);
   const [visualDbStatus, setVisualDbStatus] = useState<any>(null);
   const [visualDbBusy, setVisualDbBusy] = useState(false);
   const [visualDbMessage, setVisualDbMessage] = useState<string | null>(null);
@@ -202,6 +216,25 @@ export const OfflineMapsPanel = ({
       }
     };
     void loadVisualDbStatus();
+  }, [apiBase]);
+
+  useEffect(() => {
+    const loadCacheInventory = async () => {
+      try {
+        const res = await fetch(`${apiBase}/tiles/cache`);
+        if (res.ok) {
+          setCacheInventory(await res.json());
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    void loadCacheInventory();
+    const timer = window.setInterval(() => {
+      void loadCacheInventory();
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [apiBase]);
 
   const mapTypeList = useMemo(
@@ -412,6 +445,7 @@ export const OfflineMapsPanel = ({
 
   const handleDownload = async () => {
     setDownloadMessage(null);
+    setClearMessage(null);
     try {
       const res = await fetch(`${apiBase}/tiles/download`, {
         method: 'POST',
@@ -441,6 +475,7 @@ export const OfflineMapsPanel = ({
 
   const handleCancel = async () => {
     setDownloadMessage(null);
+    setClearMessage(null);
     try {
       const res = await fetch(`${apiBase}/tiles/cancel`, { method: 'POST' });
       if (!res.ok) {
@@ -455,6 +490,56 @@ export const OfflineMapsPanel = ({
       setDownloadMessage('Stopping tile download...');
     } catch {
       setDownloadMessage('Cancel failed (network).');
+    }
+  };
+
+  const handleClearCache = async () => {
+    setDownloadMessage(null);
+    setClearMessage(null);
+    setIsClearingCache(true);
+    try {
+      const res = await fetch(`${apiBase}/tiles/clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          map_types: mapTypeList.length ? mapTypeList : undefined,
+          clear_visual_dbs: true,
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setClearMessage(data.reason || `Clear cache failed (${res.status})`);
+        return;
+      }
+      setCacheInventory(data.inventory || null);
+      setStatus((current: any) => ({
+        ...(current || {}),
+        state: 'idle',
+        progress: 0,
+        downloaded: 0,
+        total: 0,
+        stopped: false,
+        error: null,
+      }));
+      setVisualDbStatus((current: any) => ({
+        ...(current || {}),
+        active_map_db_path: null,
+        active_tile_zoom_level: null,
+      }));
+      localStorage.removeItem('chaox.visualMapDbPath');
+      const cleared = Array.isArray(data.cleared_map_types) && data.cleared_map_types.length
+        ? data.cleared_map_types.join(', ')
+        : 'selected map types';
+      const clearedVisualDbCount = Array.isArray(data.cleared_visual_dbs) ? data.cleared_visual_dbs.length : 0;
+      setClearMessage(
+        clearedVisualDbCount > 0
+          ? `Cleared cache for ${cleared} and removed ${clearedVisualDbCount} visual DB folder(s).`
+          : `Cleared cache for ${cleared}.`
+      );
+    } catch {
+      setClearMessage('Clear cache failed (network).');
+    } finally {
+      setIsClearingCache(false);
     }
   };
 
@@ -767,10 +852,20 @@ export const OfflineMapsPanel = ({
               >
                 {isCanceling ? 'Canceling...' : 'Cancel Download'}
               </Button>
-              <Button variant="destructive" className="flex-1">Clear Cache</Button>
+              <Button
+                variant="destructive"
+                className="flex-1"
+                onClick={handleClearCache}
+                disabled={isDownloading || isCanceling || isClearingCache}
+              >
+                {isClearingCache ? 'Clearing...' : 'Clear Cache'}
+              </Button>
             </div>
             {downloadMessage && (
               <div className="text-[11px] text-muted-foreground">{downloadMessage}</div>
+            )}
+            {clearMessage && (
+              <div className="text-[11px] text-muted-foreground">{clearMessage}</div>
             )}
             <div className="rounded-md border border-border/60 bg-background/70 p-2 space-y-2">
               <div className="flex items-center justify-between">
@@ -797,7 +892,37 @@ export const OfflineMapsPanel = ({
             {estimateError && <div>Estimate error: {estimateError}</div>}
             <div>Queue: {status?.state ?? 'idle'} • Progress: {status?.progress ?? 0}%</div>
             <div>Downloaded: {status?.downloaded ?? 0} / {status?.total ?? 0}</div>
+            {status?.error && <div>Download error: {status.error}</div>}
             {isCanceling && <div>Cancel requested. Waiting for the current tile fetch to stop.</div>}
+            <div>Cache root: {cacheInventory?.cache_root ?? '-'}</div>
+            <div>Total cached tiles: {typeof cacheInventory?.total_tiles === 'number' ? cacheInventory.total_tiles.toLocaleString() : '-'}</div>
+            <div>Cache size: {formatBytes(cacheInventory?.total_size_bytes)}</div>
+            {cacheInventory?.map_types && (
+              <div className="pt-2 space-y-1">
+                {Object.entries(cacheInventory.map_types).map(([mapType, info]: [string, any]) => (
+                  <div key={mapType} className="rounded-md border border-border/50 bg-background/60 px-2 py-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="capitalize text-foreground">{mapType}</span>
+                      <span>{Number(info?.tile_count || 0).toLocaleString()} tiles</span>
+                    </div>
+                    <div>Zooms: {Array.isArray(info?.zoom_levels) && info.zoom_levels.length ? info.zoom_levels.join(', ') : 'none'}</div>
+                    <div>Size: {formatBytes(info?.size_bytes)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {Array.isArray(cacheInventory?.visual_dbs) && cacheInventory.visual_dbs.length > 0 && (
+              <div className="pt-2 space-y-1">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Visual DB Folders</div>
+                {cacheInventory.visual_dbs.map((db: any) => (
+                  <div key={db.path} className="rounded-md border border-border/50 bg-background/60 px-2 py-1">
+                    <div className="text-foreground">{db.name}</div>
+                    <div>{Number(db.tile_count || 0).toLocaleString()} tiles • {formatBytes(db.size_bytes)}</div>
+                    <div className="break-all">{db.path}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </ScrollArea>

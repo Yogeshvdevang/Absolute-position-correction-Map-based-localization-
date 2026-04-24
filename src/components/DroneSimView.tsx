@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import '@/styles/drone-sim.css';
+import { publishSimCameraFrame } from '@/lib/simCameraBridge';
 
 type SimState = {
   flying: boolean;
@@ -52,6 +53,14 @@ type CalibrationPanel = 'none' | 'rc' | 'joystick';
 type AxisKey = 'roll' | 'pitch' | 'yaw' | 'throttle';
 type AxisCalibration = { min: number; center: number; max: number };
 type CameraViewKey = 'bottom' | 'bottomClean' | 'front' | 'left' | 'right';
+type SimTelemetrySample = {
+  lat: number;
+  lon: number;
+  alt: number;
+  yaw: number;
+  groundspeed: number;
+  timestamp: string;
+};
 
 const INSET = { width: 240, height: 160, margin: 16 };
 const CAMERA_INSET_ASPECT_RATIO = INSET.width / INSET.height;
@@ -59,6 +68,12 @@ const CAMERA_INSET_MIN_WIDTH = 160;
 const CAMERA_INSET_STORAGE_KEY = 'chaox.droneSim.cameraInsetWidth';
 const CAMERA_STREAM_TARGET_FPS = 120;
 const CAMERA_STREAM_INTERVAL_MS = 1000 / CAMERA_STREAM_TARGET_FPS;
+const CAMERA_BRIDGE_TARGET_FPS = 15;
+const CAMERA_BRIDGE_INTERVAL_MS = 1000 / CAMERA_BRIDGE_TARGET_FPS;
+const CAMERA_BUFFER_FALLBACK_INTERVAL_MS = 700;
+const SIM_TELEMETRY_INTERVAL_MS = 200;
+const SIM_APC_INGEST_INTERVAL_MS = 1400;
+const SIM_VEHICLE_ID = 'vehicle-1';
 const MAP_TILE = { tileSize: 256, grid: 3 };
 const MISSION_PRESETS: MissionPreset[] = [
   {
@@ -317,6 +332,8 @@ export const DroneSimView = () => {
   const mapZoomMaxRef = useRef(18);
   const telemetryWsRef = useRef<WebSocket | null>(null);
   const cameraWsRef = useRef<WebSocket | null>(null);
+  const cameraWsAutoConnectRef = useRef(true);
+  const cameraWsReconnectTimerRef = useRef<number | null>(null);
   const wsLastUpdateRef = useRef(0);
   const groundTextureRef = useRef<THREE.CanvasTexture | null>(null);
   const groundCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -399,6 +416,12 @@ export const DroneSimView = () => {
   const cameraStreamLastSentRef = useRef(0);
   const cameraStreamFrameCountRef = useRef(0);
   const cameraStreamWindowStartRef = useRef(0);
+  const simulatorTelemetryRef = useRef<SimTelemetrySample | null>(null);
+  const simulatorTelemetryLastSentRef = useRef(0);
+  const simulatorBridgeLastSentRef = useRef(0);
+  const simulatorCameraFallbackLastSentRef = useRef(0);
+  const simulatorApcLastSentRef = useRef(0);
+  const simulatorApcBusyRef = useRef(false);
   const rcCalibrationCaptureRef = useRef<Record<AxisKey, AxisCalibration>>({
     roll: { min: 1000, center: 1500, max: 2000 },
     pitch: { min: 1000, center: 1500, max: 2000 },
@@ -457,6 +480,11 @@ export const DroneSimView = () => {
   };
 
   const connectCameraWs = () => {
+    cameraWsAutoConnectRef.current = true;
+    if (cameraWsReconnectTimerRef.current !== null) {
+      window.clearTimeout(cameraWsReconnectTimerRef.current);
+      cameraWsReconnectTimerRef.current = null;
+    }
     if (cameraWsRef.current) cameraWsRef.current.close();
     setCameraWsStatus('connecting');
     setCameraStreamFps(0);
@@ -464,19 +492,149 @@ export const DroneSimView = () => {
     cameraStreamWindowStartRef.current = performance.now();
     const ws = new WebSocket(cameraWsUrl);
     cameraWsRef.current = ws;
-    ws.onopen = () => setCameraWsStatus('connected');
+    ws.onopen = () => {
+      if (cameraWsReconnectTimerRef.current !== null) {
+        window.clearTimeout(cameraWsReconnectTimerRef.current);
+        cameraWsReconnectTimerRef.current = null;
+      }
+      setCameraWsStatus('connected');
+    };
     ws.onerror = () => setCameraWsStatus('error');
     ws.onclose = () => {
+      if (cameraWsRef.current === ws) {
+        cameraWsRef.current = null;
+      }
       setCameraWsStatus('disconnected');
       setCameraStreamFps(0);
+      if (cameraWsAutoConnectRef.current) {
+        cameraWsReconnectTimerRef.current = window.setTimeout(() => {
+          cameraWsReconnectTimerRef.current = null;
+          connectCameraWs();
+        }, 1000);
+      }
     };
   };
 
   const disconnectCameraWs = () => {
+    cameraWsAutoConnectRef.current = false;
+    if (cameraWsReconnectTimerRef.current !== null) {
+      window.clearTimeout(cameraWsReconnectTimerRef.current);
+      cameraWsReconnectTimerRef.current = null;
+    }
     cameraWsRef.current?.close();
     cameraWsRef.current = null;
     setCameraWsStatus('disconnected');
     setCameraStreamFps(0);
+  };
+
+  useEffect(() => {
+    connectCameraWs();
+    return () => {
+      cameraWsAutoConnectRef.current = false;
+      if (cameraWsReconnectTimerRef.current !== null) {
+        window.clearTimeout(cameraWsReconnectTimerRef.current);
+        cameraWsReconnectTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const publishSimulatorTelemetry = (sample: SimTelemetrySample) => {
+    const nowMs = performance.now();
+    simulatorTelemetryRef.current = sample;
+    if (nowMs - simulatorTelemetryLastSentRef.current < SIM_TELEMETRY_INTERVAL_MS) return;
+    simulatorTelemetryLastSentRef.current = nowMs;
+
+    void fetch(`${API_BASE}/telemetry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vehicle_id: SIM_VEHICLE_ID,
+        type: 'uav',
+        domain: 'simulator',
+        lat: sample.lat,
+        lon: sample.lon,
+        alt: sample.alt,
+        roll: 0,
+        pitch: 0,
+        yaw: sample.yaw,
+        groundspeed: sample.groundspeed,
+        mode: stateRef.current.manualMode ? 'MANUAL' : stateRef.current.flying ? 'AUTO' : 'STANDBY',
+        link_quality: 1,
+      }),
+    }).catch(() => {
+      // Telemetry publication is best-effort; simulator rendering should never block on it.
+    });
+  };
+
+  const publishSimulatorApcFrame = (imageB64: string) => {
+    const sample = simulatorTelemetryRef.current;
+    const state = stateRef.current;
+    const nowMs = performance.now();
+    if (!sample || simulatorApcBusyRef.current) return;
+    if (!state.flying && !state.manualMode) return;
+    if (nowMs - simulatorApcLastSentRef.current < SIM_APC_INGEST_INTERVAL_MS) return;
+
+    simulatorApcLastSentRef.current = nowMs;
+    simulatorApcBusyRef.current = true;
+    void fetch(`${API_BASE}/apc/frame`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        frame_id: `sim-bottom-${Date.now()}`,
+        timestamp: sample.timestamp,
+        lat: sample.lat,
+        lon: sample.lon,
+        alt: sample.alt,
+        yaw: sample.yaw,
+        pitch: 0,
+        roll: 0,
+        image_b64: imageB64,
+        meta: {
+          requested_from: 'drone_simulator',
+          stream_mode: 'simulator_bottom_camera',
+          vehicle_id: SIM_VEHICLE_ID,
+          groundspeed: sample.groundspeed,
+        },
+      }),
+    })
+      .catch(() => {
+        // APC ingestion is best-effort; the dashboard can still request frames manually.
+      })
+      .finally(() => {
+        simulatorApcBusyRef.current = false;
+      });
+  };
+
+  const publishSimulatorCameraFallbackFrame = (imageB64: string) => {
+    const nowMs = performance.now();
+    if (nowMs - simulatorCameraFallbackLastSentRef.current < CAMERA_BUFFER_FALLBACK_INTERVAL_MS) return;
+    simulatorCameraFallbackLastSentRef.current = nowMs;
+
+    void fetch(`${API_BASE}/camera/frame`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_b64: imageB64,
+        timestamp: new Date().toISOString(),
+        source: 'drone_simulator_fallback',
+        meta: {
+          vehicle_id: SIM_VEHICLE_ID,
+        },
+      }),
+    }).catch(() => {
+      // Camera buffer fallback is best-effort.
+    });
+  };
+
+  const publishSimulatorCameraBridgeFrame = (imageB64: string) => {
+    const nowMs = performance.now();
+    if (nowMs - simulatorBridgeLastSentRef.current < CAMERA_BRIDGE_INTERVAL_MS) return;
+    simulatorBridgeLastSentRef.current = nowMs;
+    publishSimCameraFrame({
+      imageB64,
+      timestamp: Date.now(),
+      source: 'bottomClean',
+    });
   };
 
   const stateRef = useRef<SimState>({
@@ -1732,6 +1890,24 @@ export const DroneSimView = () => {
       if (streamRef.current) streamRef.current.textContent = text;
     };
 
+    const updateSimulatorTelemetry = (lat: number, lon: number, alt: number) => {
+      const horizontalSpeed = Math.hypot(state.velocity.x, -state.velocity.z);
+      const yawRad = state.manualMode
+        ? state.manualYaw
+        : horizontalSpeed > 0.001
+          ? Math.atan2(state.velocity.x, -state.velocity.z)
+          : 0;
+      const yaw = ((yawRad * 180 / Math.PI) + 360) % 360;
+      publishSimulatorTelemetry({
+        lat,
+        lon,
+        alt,
+        yaw,
+        groundspeed: horizontalSpeed,
+        timestamp: new Date().toISOString(),
+      });
+    };
+
     const updateLoop = () => {
       controls.update();
       updateLabelPositions();
@@ -1843,6 +2019,7 @@ export const DroneSimView = () => {
       const curAlt = state.currentPos.y;
 
       generateDataPacket(curLat, curLon, curAlt);
+      updateSimulatorTelemetry(curLat, curLon, curAlt);
       loadGroundMap(state.refLat, state.refLon, mapSourceRef.current, computeZoomForAlt(curAlt));
       return;
       }
@@ -1921,6 +2098,7 @@ export const DroneSimView = () => {
       const curAlt = state.currentPos.y;
 
       generateDataPacket(curLat, curLon, curAlt);
+      updateSimulatorTelemetry(curLat, curLon, curAlt);
       loadGroundMap(state.refLat, state.refLon, mapSourceRef.current, computeZoomForAlt(curAlt));
     };
 
@@ -2009,11 +2187,26 @@ export const DroneSimView = () => {
 
       const cameraSocket = cameraWsRef.current;
       const cleanCamera = droneCameraRefs.current.bottomClean;
-      if (
+      const streamNow = performance.now();
+      const hasLiveCameraSocket = Boolean(
         cameraSocket &&
-        cameraSocket.readyState === WebSocket.OPEN &&
+        cameraSocket.readyState === WebSocket.OPEN
+      );
+      const shouldSendCameraStream = Boolean(
+        hasLiveCameraSocket &&
+        streamNow - cameraStreamLastSentRef.current >= CAMERA_STREAM_INTERVAL_MS
+      );
+      const shouldPushCameraFallback = streamNow - simulatorCameraFallbackLastSentRef.current >= CAMERA_BUFFER_FALLBACK_INTERVAL_MS;
+      const shouldIngestApcFrame = Boolean(
         cleanCamera &&
-        performance.now() - cameraStreamLastSentRef.current >= CAMERA_STREAM_INTERVAL_MS
+        simulatorTelemetryRef.current &&
+        (state.flying || state.manualMode) &&
+        !simulatorApcBusyRef.current &&
+        streamNow - simulatorApcLastSentRef.current >= SIM_APC_INGEST_INTERVAL_MS
+      );
+      if (
+        cleanCamera &&
+        (shouldSendCameraStream || shouldPushCameraFallback || shouldIngestApcFrame)
       ) {
         const prevPathVisible = state.pathLine?.visible ?? true;
         const prevTrailVisible = state.trailLine?.visible ?? true;
@@ -2051,21 +2244,34 @@ export const DroneSimView = () => {
         if (state.trailLine) state.trailLine.visible = prevTrailVisible;
         try {
           const jpgBase64 = streamRenderer.domElement.toDataURL('image/jpeg', 0.72).split(',')[1];
-          cameraSocket.send(jpgBase64);
-          const sentAt = performance.now();
-          cameraStreamLastSentRef.current = sentAt;
-          if (cameraStreamWindowStartRef.current === 0) {
-            cameraStreamWindowStartRef.current = sentAt;
+          let sentOverWs = false;
+          if (shouldSendCameraStream && cameraSocket?.readyState === WebSocket.OPEN) {
+            cameraSocket.send(jpgBase64);
+            const sentAt = performance.now();
+            cameraStreamLastSentRef.current = sentAt;
+            if (cameraStreamWindowStartRef.current === 0) {
+              cameraStreamWindowStartRef.current = sentAt;
+            }
+            cameraStreamFrameCountRef.current += 1;
+            const fpsWindowMs = sentAt - cameraStreamWindowStartRef.current;
+            if (fpsWindowMs >= 500) {
+              setCameraStreamFps((cameraStreamFrameCountRef.current * 1000) / fpsWindowMs);
+              cameraStreamFrameCountRef.current = 0;
+              cameraStreamWindowStartRef.current = sentAt;
+            }
+            sentOverWs = true;
           }
-          cameraStreamFrameCountRef.current += 1;
-          const fpsWindowMs = sentAt - cameraStreamWindowStartRef.current;
-          if (fpsWindowMs >= 500) {
-            setCameraStreamFps((cameraStreamFrameCountRef.current * 1000) / fpsWindowMs);
-            cameraStreamFrameCountRef.current = 0;
-            cameraStreamWindowStartRef.current = sentAt;
+          publishSimulatorCameraBridgeFrame(jpgBase64);
+          if (shouldPushCameraFallback || !sentOverWs) {
+            publishSimulatorCameraFallbackFrame(jpgBase64);
+          }
+          if (shouldIngestApcFrame) {
+            publishSimulatorApcFrame(jpgBase64);
           }
         } catch {
-          setCameraWsStatus('error');
+          if (shouldSendCameraStream) {
+            setCameraWsStatus('error');
+          }
         }
       }
 
