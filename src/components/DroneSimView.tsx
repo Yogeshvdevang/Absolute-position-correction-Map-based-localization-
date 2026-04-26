@@ -283,6 +283,22 @@ export const DroneSimView = () => {
     left: false,
     right: false,
   });
+  
+  const [legendToggles, setLegendToggles] = useState({
+    velocity: true,
+    acceleration: true,
+    trail: true,
+    xpos: true,
+    xneg: true,
+    ypos: true,
+    yneg: true,
+  });
+  const legendTogglesRef = useRef(legendToggles);
+  const toggleLegend = (key: keyof typeof legendToggles) => {
+    const next = { ...legendToggles, [key]: !legendToggles[key] };
+    setLegendToggles(next);
+    legendTogglesRef.current = next;
+  };
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const [cameraInsetWidth, setCameraInsetWidth] = useState(() => {
     const raw = localStorage.getItem(CAMERA_INSET_STORAGE_KEY);
@@ -1630,7 +1646,30 @@ export const DroneSimView = () => {
     state.droneGroup = new THREE.Group();
     state.propellers = [];
 
-    const bodyGeo = new THREE.BoxGeometry(1.0, 0.4, 1.0);
+    const bodyShape = new THREE.Shape();
+    const bw = 0.92, bd = 0.92, br = 0.3;
+    bodyShape.moveTo(-bw/2 + br, -bd/2);
+    bodyShape.lineTo(bw/2 - br, -bd/2);
+    bodyShape.quadraticCurveTo(bw/2, -bd/2, bw/2, -bd/2 + br);
+    bodyShape.lineTo(bw/2, bd/2 - br);
+    bodyShape.quadraticCurveTo(bw/2, bd/2, bw/2 - br, bd/2);
+    bodyShape.lineTo(-bw/2 + br, bd/2);
+    bodyShape.quadraticCurveTo(-bw/2, bd/2, -bw/2, bd/2 - br);
+    bodyShape.lineTo(-bw/2, -bd/2 + br);
+    bodyShape.quadraticCurveTo(-bw/2, -bd/2, -bw/2 + br, -bd/2);
+
+    const bodyExtrudeSettings = {
+      depth: 0.32,
+      bevelEnabled: true,
+      bevelSegments: 4,
+      steps: 1,
+      bevelSize: 0.04,
+      bevelThickness: 0.04
+    };
+    const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, bodyExtrudeSettings);
+    bodyGeo.translate(0, 0, -0.16);
+    bodyGeo.rotateX(Math.PI / 2);
+    
     const bodyMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.castShadow = true;
@@ -1736,6 +1775,201 @@ export const DroneSimView = () => {
     arrowMesh.position.z = 0.9;
     state.droneGroup.add(arrowMesh);
 
+    // ── F450-style curved landing gear ───────────────────────────────────────
+    // Four curved legs (one per arm), each ending in alternating
+    // black / yellow rubber-dampener cylinders, plus two cross-rails (skids).
+    (() => {
+      const legMat          = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.25, roughness: 0.65 });
+      const rubberBlackMat  = new THREE.MeshStandardMaterial({ color: 0x0d0d0d, roughness: 0.92, metalness: 0.0 });
+      const rubberYellowMat = new THREE.MeshStandardMaterial({ color: 0xd4a500, roughness: 0.70, metalness: 0.05 });
+
+      // Arm-tip positions — same X/Z as propellers
+      const mountPts: Array<[number, number]> = [
+        [ 1.2,  1.2],
+        [-1.2,  1.2],
+        [ 1.2, -1.2],
+        [-1.2, -1.2],
+      ];
+
+      const topY    =  0.0;    // Y at arm connection
+      const footY   = -1.25;  // Y at ground
+      const spread  =  0.30;  // outward spread of each foot
+
+      // Build one curved leg + rubber dampener tip
+      const addLeg = (mx: number, mz: number) => {
+        const sx = mx > 0 ? 1 : -1;
+        const sz = mz > 0 ? 1 : -1;
+
+        const p0 = new THREE.Vector3(mx, topY, mz);
+        const p1 = new THREE.Vector3(mx + sx * spread * 0.35, topY - 0.32, mz + sz * spread * 0.35);
+        const p2 = new THREE.Vector3(mx + sx * spread * 0.70, topY - 0.68, mz + sz * spread * 0.70);
+        const p3 = new THREE.Vector3(mx + sx * spread,        footY + 0.10, mz + sz * spread);
+
+        const curve   = new THREE.CatmullRomCurve3([p0, p1, p2, p3]);
+        const tubeGeo = new THREE.TubeGeometry(curve, 24, 0.055, 10, false);
+        const tube    = new THREE.Mesh(tubeGeo, legMat);
+        tube.castShadow = true;
+        state.droneGroup!.add(tube);
+
+      };
+
+      // Add foam bumpers on the skid tips (horizontal, aligned with Z axis)
+      const addBumper = (fx: number, fy: number, fz: number, sz: number) => {
+        const dir = sz > 0 ? 1 : -1;
+        const mkCyl = (mat: THREE.Material, radius: number, len: number, zOffset: number) => {
+          const geo = new THREE.CylinderGeometry(radius, radius, len, 14);
+          const m = new THREE.Mesh(geo, mat);
+          m.rotation.x = Math.PI / 2;
+          m.position.set(fx, fy, fz + dir * zOffset);
+          state.droneGroup!.add(m);
+        };
+        mkCyl(rubberBlackMat,  0.058, 0.09, 0.0);
+        mkCyl(rubberYellowMat, 0.068, 0.072, 0.08);
+        mkCyl(rubberBlackMat,  0.058, 0.09, 0.16);
+      };
+
+      const strutGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.28, 12);
+      mountPts.forEach(([mx, mz]) => {
+        const strut = new THREE.Mesh(strutGeo, legMat);
+        strut.position.set(mx, topY - 0.14, mz);
+        state.droneGroup!.add(strut);
+        addLeg(mx, mz);
+        const sx = mx > 0 ? 1 : -1;
+        const sz = mz > 0 ? 1 : -1;
+        const fx = mx + sx * spread;
+        const fz = mz + sz * spread;
+        addBumper(fx, footY + 0.055, fz, sz);
+      });
+
+      const addSkid = (x: number) => {
+        const fz =  (1.2 + spread);
+        const bz = -(1.2 + spread);
+        const fy = footY + 0.055;
+        const railCurve = new THREE.CatmullRomCurve3([
+          new THREE.Vector3(x, fy, fz),
+          new THREE.Vector3(x, fy + 0.065, 0),
+          new THREE.Vector3(x, fy, bz),
+        ]);
+        const railGeo = new THREE.TubeGeometry(railCurve, 20, 0.048, 10, false);
+        const rail    = new THREE.Mesh(railGeo, legMat);
+        rail.castShadow = true;
+        state.droneGroup!.add(rail);
+      };
+
+      const skidX = 1.2 + spread;
+      addSkid( skidX);  // right skid
+      addSkid(-skidX);  // left skid
+    })();
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── SIYI A8 Mini Style Gimbal Camera ─────────────────────────────────────
+    (() => {
+      const gimbalGroup = new THREE.Group();
+      
+      const blackMat   = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8, metalness: 0.2 });
+      const greyMat    = new THREE.MeshStandardMaterial({ color: 0x2a2d34, roughness: 0.6, metalness: 0.3 });
+      const orangeMat  = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.4, metalness: 0.1 });
+      const glassMat   = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.1, metalness: 0.9, transparent: true, opacity: 0.8 });
+
+      // 1. Damping Plate Mount
+      const mountGeo = new THREE.BoxGeometry(0.20, 0.02, 0.20);
+      const mount = new THREE.Mesh(mountGeo, blackMat);
+      mount.position.set(0, 0, 0);
+      gimbalGroup.add(mount);
+
+      // Rubber Dampers (4 small spheres between plates)
+      const damperGeo = new THREE.SphereGeometry(0.025, 12, 12);
+      const positions = [[0.08, 0.08], [-0.08, 0.08], [0.08, -0.08], [-0.08, -0.08]];
+      positions.forEach(([x, z]) => {
+        const d = new THREE.Mesh(damperGeo, blackMat);
+        d.position.set(x, -0.025, z);
+        gimbalGroup.add(d);
+      });
+
+      const lowerMount = new THREE.Mesh(mountGeo, blackMat);
+      lowerMount.position.set(0, -0.05, 0);
+      gimbalGroup.add(lowerMount);
+
+      // 2. Yaw Motor (Cylinder)
+      const yawMotorGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.08, 24);
+      const yawMotor = new THREE.Mesh(yawMotorGeo, blackMat);
+      yawMotor.position.set(0, -0.10, 0);
+      gimbalGroup.add(yawMotor);
+
+      // 3. Gimbal Arm (L shape: down then horizontal)
+      const armVertGeo = new THREE.BoxGeometry(0.03, 0.14, 0.05);
+      const armVert = new THREE.Mesh(armVertGeo, greyMat);
+      armVert.position.set(0.06, -0.18, 0);
+      gimbalGroup.add(armVert);
+
+      const armHorizGeo = new THREE.BoxGeometry(0.12, 0.03, 0.05);
+      const armHoriz = new THREE.Mesh(armHorizGeo, greyMat);
+      armHoriz.position.set(0.03, -0.24, 0);
+      gimbalGroup.add(armHoriz);
+
+      // 4. Pitch Motor
+      const pitchMotorGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.04, 24);
+      const pitchMotor = new THREE.Mesh(pitchMotorGeo, blackMat);
+      pitchMotor.rotation.z = Math.PI / 2;
+      pitchMotor.position.set(0.09, -0.24, 0);
+      gimbalGroup.add(pitchMotor);
+
+      // Orange trim ring on pitch motor
+      const ringGeo = new THREE.TorusGeometry(0.055, 0.006, 12, 32);
+      const pitchRing = new THREE.Mesh(ringGeo, orangeMat);
+      pitchRing.rotation.y = Math.PI / 2;
+      pitchRing.position.set(0.11, -0.24, 0);
+      gimbalGroup.add(pitchRing);
+
+      // 5. Camera Body
+      const camBodyGeo = new THREE.BoxGeometry(0.14, 0.14, 0.16);
+      const camBody = new THREE.Mesh(camBodyGeo, greyMat);
+      camBody.position.set(-0.01, -0.24, 0); // centered relatively
+
+      // Orange trim on face
+      const faceTrimGeo = new THREE.BoxGeometry(0.145, 0.145, 0.01);
+      const faceTrim = new THREE.Mesh(faceTrimGeo, orangeMat);
+      faceTrim.position.set(0, 0, 0.076);
+      camBody.add(faceTrim);
+      
+      const faceInnerGeo = new THREE.BoxGeometry(0.13, 0.13, 0.015);
+      const faceInner = new THREE.Mesh(faceInnerGeo, greyMat);
+      faceInner.position.set(0, 0, 0.076);
+      camBody.add(faceInner);
+
+      // 6. Lenses
+      const addLens = (y: number, outerRad: number, innerRad: number, protrude: number) => {
+        const tube = new THREE.Mesh(new THREE.CylinderGeometry(outerRad, outerRad, 0.04, 24), blackMat);
+        tube.rotation.x = Math.PI / 2;
+        tube.position.set(0, y, 0.08 + protrude / 2);
+        const glass = new THREE.Mesh(new THREE.CylinderGeometry(innerRad, innerRad, 0.045, 24), glassMat);
+        glass.rotation.x = Math.PI / 2;
+        glass.position.set(0, y, 0.08 + protrude / 2);
+        camBody.add(tube);
+        camBody.add(glass);
+      };
+
+      // Top main sensor
+      addLens(0.025, 0.035, 0.025, 0.02);
+      // Bottom secondary sensor
+      addLens(-0.035, 0.022, 0.015, 0.015);
+
+      gimbalGroup.add(camBody);
+
+      // Enable shadows
+      gimbalGroup.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+
+      // Mount to drone (front underbelly)
+      gimbalGroup.position.set(0, -0.2, 0.65);
+      state.droneGroup!.add(gimbalGroup);
+    })();
+    // ─────────────────────────────────────────────────────────────────────────
+
     state.velArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 0, 0x4ade80);
     state.accArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 0, 0xf87171);
     state.droneGroup.add(state.velArrow);
@@ -1761,7 +1995,7 @@ export const DroneSimView = () => {
     state.axisGroup = axisGroup;
 
     const bottomCamera = new THREE.PerspectiveCamera(60, CAMERA_INSET_ASPECT_RATIO, 0.1, 5000);
-    bottomCamera.position.set(0, -1.4, 0);
+    bottomCamera.position.set(0, -0.22, 0);
     bottomCamera.rotation.x = -Math.PI / 2;
     state.droneGroup.add(bottomCamera);
     const { helper: bottomFovHelper, update: updateBottomFovHelper } = createFrustumHelper(bottomCamera);
@@ -1970,6 +2204,7 @@ export const DroneSimView = () => {
           state.currentPos.y += vertical * state.manualVertSpeed * dt;
         }
 
+        state.currentPos.y = Math.max(1.263, state.currentPos.y);
         const stepDist = state.currentPos.distanceTo(prevPos);
         state.manualDistance += stepDist;
         const newVel = state.currentPos.clone().sub(prevPos).divideScalar(dt);
@@ -2031,6 +2266,7 @@ export const DroneSimView = () => {
 
       state.prevPos.copy(state.currentPos);
       state.currentPos.lerpVectors(state.startPos, state.endPos, progress);
+      state.currentPos.y = Math.max(1.263, state.currentPos.y);
 
       const speed = Math.max(0.1, getNumber(speedRef, 10));
       const moveVec = new THREE.Vector3().subVectors(state.endPos, state.startPos);
@@ -2105,6 +2341,19 @@ export const DroneSimView = () => {
     const animate = () => {
       animRef.current = requestAnimationFrame(animate);
       updateLoop();
+      
+      const st = stateRef.current;
+      if (st.velArrow) st.velArrow.visible = st.velArrow.visible && legendTogglesRef.current.velocity;
+      if (st.accArrow) st.accArrow.visible = st.accArrow.visible && legendTogglesRef.current.acceleration;
+      if (st.pathLine) st.pathLine.visible = legendTogglesRef.current.trail;
+      if (st.trailLine) st.trailLine.visible = legendTogglesRef.current.trail;
+      if (st.axisGroup && st.axisGroup.children.length >= 4) {
+        st.axisGroup.children[0].visible = legendTogglesRef.current.xpos;
+        st.axisGroup.children[1].visible = legendTogglesRef.current.xneg;
+        st.axisGroup.children[2].visible = legendTogglesRef.current.ypos;
+        st.axisGroup.children[3].visible = legendTogglesRef.current.yneg;
+      }
+
       const spinSpeed = stateRef.current.flying || stateRef.current.manualMode ? 1.1 : 0.35;
       stateRef.current.propellers.forEach((prop, index) => {
         const direction = index % 2 === 0 ? 1 : -1;
@@ -2701,17 +2950,17 @@ export const DroneSimView = () => {
 
       <div ref={viewportRef} className="drone-sim__viewport">
         <div className="drone-sim__overlay">
-          <div className="drone-sim__legend">
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--vel" />Velocity Vector</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--acc" />Acceleration Vector</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--trail" />Flight Trail</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--xpos" />+X</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--xneg" />-X</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--ypos" />+Y</div>
-            <div className="drone-sim__legend-row"><span className="drone-sim__swatch drone-sim__swatch--yneg" />-Y</div>
+          <div className="drone-sim__legend" style={{ pointerEvents: 'auto' }}>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.velocity} onChange={() => toggleLegend('velocity')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--vel" />Velocity Vector</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.acceleration} onChange={() => toggleLegend('acceleration')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--acc" />Acceleration Vector</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.trail} onChange={() => toggleLegend('trail')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--trail" />Flight Trail</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.xpos} onChange={() => toggleLegend('xpos')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--xpos" />+X</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.xneg} onChange={() => toggleLegend('xneg')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--xneg" />-X</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.ypos} onChange={() => toggleLegend('ypos')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--ypos" />+Y</label>
+            <label className="drone-sim__legend-row" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}><input type="checkbox" checked={legendToggles.yneg} onChange={() => toggleLegend('yneg')} style={{ marginRight: 6, margin: 0 }} /><span className="drone-sim__swatch drone-sim__swatch--yneg" />-Y</label>
           </div>
-          <div style={{ marginTop: 5, color: '#aaa', fontSize: 10 }}>(Left Click: Rotate | Right Click: Pan | Scroll: Zoom)</div>
-          <div ref={distRef}>Dist: 0m</div>
+          <div style={{ marginTop: 5, color: '#000', fontSize: 11, fontWeight: 600, textShadow: '0 0 3px rgba(255,255,255,0.8)' }}>(Left Click: Rotate | Right Click: Pan | Scroll: Zoom)</div>
+          <div ref={distRef} style={{ color: '#000', fontSize: 13, fontWeight: 600, textShadow: '0 0 3px rgba(255,255,255,0.8)' }}>Dist: 0m</div>
         </div>
 
         {activeCameraViewKeys.map((view, index) => {
@@ -2954,4 +3203,6 @@ export const DroneSimView = () => {
     </div>
   );
 };
+
+
 
