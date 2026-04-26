@@ -23,6 +23,9 @@ type SimState = {
   endPos: THREE.Vector3;
   currentPos: THREE.Vector3;
   prevPos: THREE.Vector3;
+  routePoints: THREE.Vector3[];
+  waypointIndex: number;
+  waypointLabels: string[];
   velocity: THREE.Vector3;
   acceleration: THREE.Vector3;
   refLat: number;
@@ -672,6 +675,9 @@ export const DroneSimView = () => {
     endPos: new THREE.Vector3(),
     currentPos: new THREE.Vector3(),
     prevPos: new THREE.Vector3(),
+    routePoints: [],
+    waypointIndex: 0,
+    waypointLabels: [],
     velocity: new THREE.Vector3(),
     acceleration: new THREE.Vector3(),
     refLat: MAP_DEFAULT[1],
@@ -753,41 +759,51 @@ export const DroneSimView = () => {
     const state = stateRef.current;
     const presetId = presetRef.current?.value as MissionPreset['id'] | undefined;
     const preset = MISSION_PRESETS.find((entry) => entry.id === presetId) ?? DEFAULT_PRESET;
-    const start = randomOffsetPoint(preset);
-    const target = randomOffsetPoint(preset);
-    const startAlt = 20;
-    const endAlt = 50;
+
+    const WAYPOINT_LABELS = ['A', 'B', 'C', 'D'];
+    const altitudes = [20, 45, 35, 50];
     const speed = 10;
+
+    // Generate 4 geo waypoints
+    const geoPoints = WAYPOINT_LABELS.map(() => randomOffsetPoint(preset));
+
+    const start = geoPoints[0];
+    state.refLat = start.lat;
+    state.refLon = start.lon;
+    state.refAlt = altitudes[0];
+    loadGroundMap(start.lat, start.lon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
+
+    // Convert geo waypoints to local 3-D positions
+    const R = 6371000;
+    const latRad0 = start.lat * Math.PI / 180;
+    const route3D: THREE.Vector3[] = geoPoints.map((pt, i) => {
+      const dLat = (pt.lat - start.lat) * Math.PI / 180;
+      const dLon = (pt.lon - start.lon) * Math.PI / 180;
+      const dN = dLat * R;
+      const dE = dLon * Math.cos(latRad0) * R;
+      return new THREE.Vector3(dE, altitudes[i], -dN);
+    });
+
+    state.routePoints = route3D;
+    state.waypointLabels = WAYPOINT_LABELS;
+    state.waypointIndex = 0;
+    state.startPos.copy(route3D[0]);
+    state.endPos.copy(route3D[1]);
 
     if (startLatRef.current) startLatRef.current.value = start.lat.toFixed(6);
     if (startLonRef.current) startLonRef.current.value = start.lon.toFixed(6);
-    if (startAltRef.current) startAltRef.current.value = String(startAlt);
-    if (endLatRef.current) endLatRef.current.value = target.lat.toFixed(6);
-    if (endLonRef.current) endLonRef.current.value = target.lon.toFixed(6);
-    if (endAltRef.current) endAltRef.current.value = String(endAlt);
+    if (startAltRef.current) startAltRef.current.value = String(altitudes[0]);
+    if (endLatRef.current) endLatRef.current.value = geoPoints[1].lat.toFixed(6);
+    if (endLonRef.current) endLonRef.current.value = geoPoints[1].lon.toFixed(6);
+    if (endAltRef.current) endAltRef.current.value = String(altitudes[1]);
     if (speedRef.current) speedRef.current.value = String(speed);
 
     if (statusRef.current) {
-      statusRef.current.textContent = `${preset.label} mission ready`;
+      statusRef.current.textContent = `${preset.label} - ${WAYPOINT_LABELS.length}-waypoint mission ready`;
       statusRef.current.style.color = '#4ade80';
     }
 
-    state.refLat = start.lat;
-    state.refLon = start.lon;
-    state.refAlt = startAlt;
-    loadGroundMap(start.lat, start.lon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
-
-    const R = 6371000;
-    const dLat = (target.lat - start.lat) * Math.PI / 180;
-    const dLon = (target.lon - start.lon) * Math.PI / 180;
-    const latRad = start.lat * Math.PI / 180;
-    const dN = dLat * R;
-    const dE = dLon * Math.cos(latRad) * R;
-
-    state.startPos.set(0, startAlt, 0);
-    state.endPos.set(dE, endAlt, -dN);
-
-    updateLabelText(start.lat, start.lon, startAlt, target.lat, target.lon, endAlt);
+    updateLabelText(start.lat, start.lon, altitudes[0], geoPoints[1].lat, geoPoints[1].lon, altitudes[1]);
     viewHome();
   };
 
@@ -1300,27 +1316,36 @@ export const DroneSimView = () => {
       manualBtnRef.current.classList.remove('active');
     }
 
-    state.refLat = startLat;
-    state.refLon = getNumber(startLonRef, 0);
-    state.refAlt = getNumber(startAltRef, 0);
-    loadGroundMap(state.refLat, state.refLon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
+    const speed = Math.max(0.1, getNumber(speedRef, 10));
 
-    const tLat = getNumber(endLatRef, 0);
-    const tLon = getNumber(endLonRef, 0);
-    const tAlt = getNumber(endAltRef, 0);
-
-    const R = 6378137;
-    const dLat = (tLat - state.refLat) * Math.PI / 180;
-    const dLon = (tLon - state.refLon) * Math.PI / 180;
-    const latRad = state.refLat * Math.PI / 180;
-    const distN = dLat * R;
-    const distE = dLon * Math.cos(latRad) * R;
-
-    state.startPos.set(0, state.refAlt, 0);
-    state.endPos.set(distE, tAlt, -distN);
+    // If autoFill populated a multi-point route, use it
+    if (state.routePoints.length >= 2) {
+      state.waypointIndex = 0;
+      state.startPos.copy(state.routePoints[0]);
+      state.endPos.copy(state.routePoints[1]);
+    } else {
+      // Fallback: 2-point route from form fields
+      state.refLat = startLat;
+      state.refLon = getNumber(startLonRef, 0);
+      state.refAlt = getNumber(startAltRef, 0);
+      loadGroundMap(state.refLat, state.refLon, mapSourceRef.current, computeZoomForAlt(state.refAlt));
+      const tLat = getNumber(endLatRef, 0);
+      const tLon = getNumber(endLonRef, 0);
+      const tAlt = getNumber(endAltRef, 0);
+      const R = 6378137;
+      const latRad = state.refLat * Math.PI / 180;
+      state.startPos.set(0, state.refAlt, 0);
+      state.endPos.set(
+        (tLon - state.refLon) * Math.PI / 180 * Math.cos(latRad) * R,
+        tAlt,
+        -(tLat - state.refLat) * Math.PI / 180 * R
+      );
+      state.routePoints = [state.startPos.clone(), state.endPos.clone()];
+      state.waypointLabels = ['A', 'B'];
+      state.waypointIndex = 0;
+    }
 
     const dist = state.startPos.distanceTo(state.endPos);
-    const speed = Math.max(0.1, getNumber(speedRef, 10));
     state.duration = dist / speed;
     state.startTime = performance.now() / 1000;
     state.totalPausedTime = 0;
@@ -1334,13 +1359,14 @@ export const DroneSimView = () => {
     state.prevPos.copy(state.startPos);
 
     if (statusRef.current) {
-      statusRef.current.textContent = 'IN FLIGHT';
+      const firstLabel = state.waypointLabels[1] ?? 'B';
+      statusRef.current.textContent = `Flying to ${firstLabel}`;
       statusRef.current.style.color = '#38bdf8';
     }
     if (pauseBtnRef.current) pauseBtnRef.current.textContent = 'Pause';
 
-    state.pathLine?.geometry.setFromPoints([state.startPos, state.endPos]);
-    updateLabelText(state.refLat, state.refLon, state.refAlt, tLat, tLon, tAlt);
+    // Draw entire multi-point route as path line
+    state.pathLine?.geometry.setFromPoints(state.routePoints);
   };
 
   const resetSim = () => {
@@ -1351,6 +1377,10 @@ export const DroneSimView = () => {
     state.manualDistance = 0;
     state.velocity.set(0, 0, 0);
     state.acceleration.set(0, 0, 0);
+    state.routePoints = [];
+    state.waypointIndex = 0;
+    state.waypointLabels = [];
+    if (state.droneGroup) state.droneGroup.rotation.set(0, 0, 0);
     state.droneGroup?.position.set(0, 0, 0);
     state.axisGroup?.position.set(0, 0, 0);
     state.trailPoints = [];
@@ -1783,7 +1813,7 @@ export const DroneSimView = () => {
       const rubberBlackMat  = new THREE.MeshStandardMaterial({ color: 0x0d0d0d, roughness: 0.92, metalness: 0.0 });
       const rubberYellowMat = new THREE.MeshStandardMaterial({ color: 0xd4a500, roughness: 0.70, metalness: 0.05 });
 
-      // Arm-tip positions — same X/Z as propellers
+      // Arm-tip positions - same X/Z as propellers
       const mountPts: Array<[number, number]> = [
         [ 1.2,  1.2],
         [-1.2,  1.2],
@@ -2274,11 +2304,28 @@ export const DroneSimView = () => {
       if (progress < 1.0) {
         state.velocity.copy(moveVec).normalize().multiplyScalar(speed);
       } else {
-        state.velocity.set(0, 0, 0);
-        state.acceleration.set(0, 0, 0);
-        state.flying = false;
-        if (statusRef.current) statusRef.current.textContent = 'ARRIVED';
-        if (pauseBtnRef.current) pauseBtnRef.current.textContent = 'Done';
+        // Advance to next waypoint if available
+        const nextIndex = state.waypointIndex + 1;
+        if (state.routePoints.length > 0 && nextIndex < state.routePoints.length - 1) {
+          state.waypointIndex = nextIndex;
+          state.startPos.copy(state.routePoints[nextIndex]);
+          state.endPos.copy(state.routePoints[nextIndex + 1]);
+          const legDist = state.startPos.distanceTo(state.endPos);
+          state.duration = legDist / speed;
+          state.startTime = now;
+          state.totalPausedTime = 0;
+          const wpLabel = state.waypointLabels[nextIndex + 1] ?? String(nextIndex + 2);
+          if (statusRef.current) {
+            statusRef.current.textContent = `Flying to ${wpLabel}`;
+            statusRef.current.style.color = '#38bdf8';
+          }
+        } else {
+          state.velocity.set(0, 0, 0);
+          state.acceleration.set(0, 0, 0);
+          state.flying = false;
+          if (statusRef.current) statusRef.current.textContent = 'MISSION COMPLETE';
+          if (pauseBtnRef.current) pauseBtnRef.current.textContent = 'Done';
+        }
       }
 
       if (progress < 0.1) state.acceleration.copy(state.velocity).multiplyScalar(2);
@@ -2293,9 +2340,15 @@ export const DroneSimView = () => {
         controls.target.copy(state.currentPos);
       }
 
+      // ── STABLE ORIENTATION: only yaw, never pitch/roll ──
       if (state.velocity.lengthSq() > 0.01) {
-        const target = state.currentPos.clone().add(state.velocity);
-        state.droneGroup?.lookAt(target);
+        const flatVel = new THREE.Vector3(state.velocity.x, 0, state.velocity.z);
+        if (flatVel.lengthSq() > 0.001) {
+          const yaw = Math.atan2(flatVel.x, flatVel.z);
+          if (state.droneGroup) {
+            state.droneGroup.rotation.set(0, yaw, 0);
+          }
+        }
       }
 
       if (state.velocity.length() > 0.1) {

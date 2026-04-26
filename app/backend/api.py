@@ -239,6 +239,12 @@ apc_train_config: Dict[str, Any] = {
 }
 rc_config = RCConfig()
 rc_status = RCStatus()
+
+apc_optflow_last_gray: Optional[np.ndarray] = None
+apc_optflow_last_pts: Optional[np.ndarray] = None
+apc_optflow_last_lat: Optional[float] = None
+apc_optflow_last_lon: Optional[float] = None
+apc_last_full_match_ts: float = 0.0
 benchmark_runner = BenchmarkRunner()
 visual_localization = VisualLocalizationService(
   VisualLocalizationConfig(
@@ -731,7 +737,10 @@ def _build_native_debug_artifacts(
 
 
 def _run_apc_pipeline(frame: APCFrame) -> APCResult:
-  global apc_last_ts
+  import math
+  global apc_last_ts, apc_optflow_last_gray, apc_optflow_last_pts
+  global apc_optflow_last_lat, apc_optflow_last_lon, apc_last_full_match_ts
+
   now = datetime.now(timezone.utc).timestamp()
   dt = 0.1 if apc_last_ts is None else max(0.01, now - apc_last_ts)
   apc_last_ts = now
@@ -742,10 +751,54 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
     frame_buffer.update(img)
   if img is None:
     img = frame_buffer.get()
+
   external_debug: Optional[Dict[str, Any]] = None
+
+  if img is not None:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if apc_optflow_last_gray is not None and apc_optflow_last_pts is not None and len(apc_optflow_last_pts) > 0:
+      new_pts, status, err = cv2.calcOpticalFlowPyrLK(apc_optflow_last_gray, gray, apc_optflow_last_pts, None)
+      if new_pts is not None:
+          good_new = new_pts[status == 1]
+          good_old = apc_optflow_last_pts[status == 1]
+          if len(good_new) > 10:
+            dx = np.mean(good_new[:, 0] - good_old[:, 0])
+            dy = np.mean(good_new[:, 1] - good_old[:, 1])
+            alt = max(1.0, frame.alt or 50.0)
+            meters_per_pixel = (1.76 * alt) / float(gray.shape[1])
+            drift_x_m = dx * meters_per_pixel
+            drift_y_m = dy * meters_per_pixel
+            yaw_rad = math.radians(frame.yaw or 0.0)
+            # rotate local translation into global ENU roughly
+            north_drift_m = drift_x_m * math.cos(yaw_rad) - drift_y_m * math.sin(yaw_rad)
+            east_drift_m = drift_x_m * math.sin(yaw_rad) + drift_y_m * math.cos(yaw_rad)
+            if apc_optflow_last_lat is not None and apc_optflow_last_lon is not None:
+                lat_update = apc_optflow_last_lat + (north_drift_m / 111320.0)
+                lon_update = apc_optflow_last_lon + (east_drift_m / (40075000.0 * math.cos(math.radians(apc_optflow_last_lat)) / 360.0))
+                apc_optflow_last_lat = lat_update
+                apc_optflow_last_lon = lon_update
+                z = np.array([[lon_update], [lat_update]])
+                apc_ekf.update(z)
+
+    pts = cv2.goodFeaturesToTrack(gray, mask=None, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
+    apc_optflow_last_gray = gray.copy()
+    if pts is not None:
+        apc_optflow_last_pts = pts
+    if apc_optflow_last_lat is None:
+        apc_optflow_last_lat = frame.lat
+        apc_optflow_last_lon = frame.lon
+
+  # Run full visual localization checkpoint if enough time has passed and alt > 15m
+  run_full_match = False
   if img is not None and visual_localization.config.enabled:
+    time_since_match = now - apc_last_full_match_ts
+    if (frame.alt is not None and frame.alt > 15.0) and time_since_match > 2.0:
+        run_full_match = True
+
+  if run_full_match:
     try:
       external_result = visual_localization.run_frame(
+
         image=img,
         frame_id=frame.frame_id,
         lat=frame.lat,
@@ -764,6 +817,7 @@ def _run_apc_pipeline(frame: APCFrame) -> APCResult:
         "match_image_b64": external_result.get("match_image_b64"),
       }
       if external_result.get("success"):
+        apc_last_full_match_ts = now
         fused_lat = external_result.get("predicted_lat")
         fused_lon = external_result.get("predicted_lon")
         if fused_lat is not None and fused_lon is not None:
