@@ -84,6 +84,12 @@ type ApcDebugArtifacts = {
   match_image_b64?: string | null;
 };
 
+type MatchFlowStep = {
+  label: string;
+  detail: string;
+  tone: 'ready' | 'warn' | 'idle';
+};
+
 type TelemetryState = {
   vehicle_id: string;
   lat: number;
@@ -918,7 +924,43 @@ const LocalizationMatchDashboard = ({
   debug?: ApcDebugArtifacts | null;
   liveFrameUrl?: string | null;
   matchStatus?: string | null;
-}) => (
+}) => {
+  const mode = debug?.mode ?? 'pending';
+  const hasQueryImage = Boolean(debug?.query_image_b64 || liveFrameUrl);
+  const hasOverlayImage = Boolean(debug?.match_image_b64);
+  const isNativeMode = mode === 'native_apc' || backendLabel.toLowerCase().includes('native');
+  const overlayTitle = isNativeMode ? 'Coarse Match Overlay' : 'Feature Match Overlay';
+  const overlaySummary = hasOverlayImage
+    ? isNativeMode
+      ? 'The center crop from the live drone frame is correlated against the reference raster. The highlighted region marks the best coarse match used for geo-fixing.'
+      : 'The overlay image shows visual correspondences between the live drone frame and the reference tile. Inliers are the matches kept after geometric verification.'
+    : isNativeMode
+      ? 'Overlay appears after the raster matcher scores the current query crop against the local map patch.'
+      : 'Overlay appears after the visual-localization matcher finds enough verified correspondences.';
+
+  const flowSteps: MatchFlowStep[] = [
+    {
+      label: 'Query Frame',
+      detail: hasQueryImage ? 'Live frame ready.' : 'Waiting for simulator image.',
+      tone: hasQueryImage ? 'ready' : 'warn',
+    },
+    {
+      label: isNativeMode ? 'Patch Search' : 'Feature Match',
+      detail: hasOverlayImage
+        ? isNativeMode
+          ? 'Reference patch scored and selected.'
+          : `${debug?.num_inliers ? `${debug.num_inliers} inlier` : 'Feature'} correspondences verified.`
+        : matchStatus || 'Matcher is waiting for a usable frame.',
+      tone: hasOverlayImage ? 'ready' : matchStatus?.toLowerCase().includes('waiting') ? 'warn' : 'idle',
+    },
+    {
+      label: 'Geo DB',
+      detail: debug?.matched_image ? `Matched tile: ${debug.matched_image}` : 'No reference tile locked yet.',
+      tone: debug?.matched_image ? 'ready' : 'idle',
+    },
+  ];
+
+  return (
   <div className={`${panelShell} relative min-h-0 overflow-hidden`}>
     <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_10%,rgba(56,189,248,0.14),transparent_22%),radial-gradient(circle_at_88%_14%,rgba(148,163,184,0.16),transparent_18%),linear-gradient(180deg,rgba(2,6,23,0.94),rgba(4,10,22,0.98))]" />
     <div className="relative flex h-full flex-col">
@@ -948,36 +990,10 @@ const LocalizationMatchDashboard = ({
           </div>
         </div>
 
-        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="match-line" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#eab308" />
-              <stop offset="48%" stopColor="#ef4444" />
-              <stop offset="100%" stopColor="#4ade80" />
-            </linearGradient>
-          </defs>
-          <line x1="18" y1="20" x2="26" y2="52" stroke="rgba(255,255,255,0.45)" strokeDasharray="1.5 1.5" />
-          <line x1="18" y1="20" x2="44" y2="52" stroke="rgba(255,255,255,0.45)" strokeDasharray="1.5 1.5" />
-          <line x1="82" y1="20" x2="74" y2="52" stroke="rgba(255,255,255,0.45)" strokeDasharray="1.5 1.5" />
-          <line x1="82" y1="20" x2="56" y2="52" stroke="rgba(255,255,255,0.35)" strokeDasharray="1.5 1.5" />
-          {[0, 1, 2, 3, 4, 5, 6, 7].map((index) => {
-            const y1 = 54 + index * 2.8;
-            const y2 = 58 + ((index * 1.9) % 18);
-            const hue = index % 3 === 0 ? '#facc15' : index % 3 === 1 ? '#ef4444' : '#4ade80';
-            return (
-              <line
-                key={index}
-                x1="12"
-                y1={String(y1)}
-                x2="58"
-                y2={String(y2)}
-                stroke={hue}
-                strokeWidth="0.42"
-                strokeOpacity="0.95"
-              />
-            );
-          })}
-        </svg>
+        <div className="pointer-events-none absolute inset-x-[18%] top-[27%] z-0 flex items-center gap-4">
+          <div className={`h-px flex-1 ${hasQueryImage ? 'bg-cyan-400/70' : 'bg-slate-700/70'}`} />
+          <div className={`h-px flex-1 ${hasOverlayImage ? 'bg-emerald-400/70' : 'bg-slate-700/70'}`} />
+        </div>
 
         <div className="absolute bottom-6 left-4 z-10 w-[31%] overflow-hidden rounded-xl border border-slate-700/80 bg-slate-950/85 shadow-[0_18px_40px_rgba(0,0,0,0.35)]">
           <div className="relative aspect-[1.08/0.68]">
@@ -1014,9 +1030,9 @@ const LocalizationMatchDashboard = ({
           </div>
         </div>
 
-        <div className="absolute left-1/2 top-[34%] z-20 w-[26%] -translate-x-1/2 overflow-hidden rounded-xl border border-slate-700/80 bg-slate-950/90 shadow-[0_18px_40px_rgba(0,0,0,0.4)]">
+        <div className="absolute left-1/2 top-[30%] z-20 w-[30%] -translate-x-1/2 overflow-hidden rounded-xl border border-slate-700/80 bg-slate-950/90 shadow-[0_18px_40px_rgba(0,0,0,0.4)]">
           <div className="border-b border-slate-700/80 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-300">
-            Live Match Overlay
+            {overlayTitle}
           </div>
           <div className="relative aspect-[1.3/0.72] overflow-hidden bg-slate-950">
             <PreviewSurface
@@ -1026,16 +1042,37 @@ const LocalizationMatchDashboard = ({
               fallback={<div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-500">{matchStatus || 'Waiting for live localization output.'}</div>}
             />
           </div>
+          <div className="border-t border-slate-700/80 px-3 py-2 text-[10px] leading-relaxed text-slate-300">
+            {overlaySummary}
+          </div>
+          <div className="grid grid-cols-3 gap-2 border-t border-slate-700/80 px-3 py-2 text-[10px] text-slate-300">
+            {flowSteps.map((step) => (
+              <div
+                key={step.label}
+                className={`rounded border px-2 py-1.5 ${
+                  step.tone === 'ready'
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+                    : step.tone === 'warn'
+                      ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                      : 'border-slate-700/70 bg-slate-900/80 text-slate-300'
+                }`}
+              >
+                <div className="uppercase tracking-[0.14em]">{step.label}</div>
+                <div className="mt-1 normal-case tracking-normal">{step.detail}</div>
+              </div>
+            ))}
+          </div>
           <div className="flex items-center justify-between border-t border-slate-700/80 px-3 py-2 text-[10px] text-slate-300">
             <span>{debug?.matched_image || 'No matched tile yet'}</span>
-            <span>{debug?.num_inliers ? `${debug.num_inliers} inliers` : 'No inliers yet'}</span>
+            <span>{debug?.num_inliers ? `${debug.num_inliers} inliers` : isNativeMode ? 'Coarse score mode' : 'No inliers yet'}</span>
           </div>
         </div>
       </div>
       <PaneFooterBar labels={['query', 'match', 'geo-db']} />
     </div>
   </div>
-);
+  );
+};
 
 const MatchPane = ({
   title,

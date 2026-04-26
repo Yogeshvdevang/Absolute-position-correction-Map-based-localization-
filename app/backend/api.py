@@ -722,6 +722,8 @@ def _build_native_debug_artifacts(
 
   return {
     "mode": "native_apc",
+    "matched_image": "coarse_raster_patch",
+    "num_inliers": None,
     "query_image_b64": _encode_preview_image(query_preview),
     "reference_image_b64": _encode_preview_image(reference_preview),
     "match_image_b64": _encode_preview_image(match_preview),
